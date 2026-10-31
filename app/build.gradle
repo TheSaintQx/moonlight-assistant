@@ -37,7 +37,7 @@ android {
                 }
             }
 
-            applicationId "com.limelight.root"
+            applicationId "ru.TheSaintQx.streamassistant"
             dimension "root"
             buildConfigField "boolean", "ROOT_BUILD", "true"
         }
@@ -49,7 +49,7 @@ android {
                 }
             }
 
-            applicationId "com.limelight"
+            applicationId "ru.TheSaintQx.streamassistant"
             dimension "root"
             buildConfigField "boolean", "ROOT_BUILD", "false"
         }
@@ -119,8 +119,8 @@ android {
             //
             // TL;DR: Leave the following line alone!
             applicationIdSuffix ".unofficial"
-            resValue "string", "app_label", "Moonlight"
-            resValue "string", "app_label_root", "Moonlight (Root)"
+            resValue "string", "app_label", "Лунный Ассистент Игр"
+            resValue "string", "app_label_root", "Лунный Ассистент Игр (Root)"
 
             minifyEnabled true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'

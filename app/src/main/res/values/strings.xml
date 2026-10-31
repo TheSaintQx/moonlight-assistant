@@ -303,4 +303,11 @@
     <string name="analogscroll_none">None (both sticks move the mouse)</string>
     <string name="analogscroll_right">Right analog stick</string>
     <string name="analogscroll_left">Left analog stick</string>
+
+    <string name="about_title">О приложении</string>
+    <string name="about_summary">Пользовательское соглашение и политика конфиденциальности</string>
+    <string name="about_eula_title">Пользовательское соглашение</string>
+    <string name="about_eula_text">Приложение предоставляется «как есть», без гарантий.\nПриложение захватывает кадры экрана и отправляет их в Yandex Cloud для анализа игровым ассистентом. Стриминг выполняется по протоколу Moonlight на ваш собственный игровой ПК.</string>
+    <string name="about_privacy_title">Политика конфиденциальности</string>
+    <string name="about_privacy_text">Кадры экрана и голосовые запросы обрабатываются сервисами Yandex Cloud (Object Storage, Cloud Functions, AI Studio) исключительно для работы ассистента. Данные третьим лицам не передаются. Разработчик: TheSaintQx.</string>
 </resources>

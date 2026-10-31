@@ -333,4 +333,8 @@
         android:title="База знаний (JSON)"
         android:summary="Тап - выбрать файл базы, он сохранится и уйдёт на сервер"
         android:dependency="checkbox_assistant_enabled" />
+
+    <com.limelight.preferences.AboutPreference
+        android:title="@string/about_title"
+        android:summary="@string/about_summary" />
 </PreferenceCategory></PreferenceScreen>
