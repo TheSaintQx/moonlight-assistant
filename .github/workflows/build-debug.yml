@@ -45,13 +45,29 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
+      - name: Set up keystore for signing
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > release.keystore
+          echo "KEYSTORE_FILE=./release.keystore" >> "$GITHUB_ENV"
+          echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+          echo "KEYSTORE_ALIAS=$KEYSTORE_ALIAS" >> "$GITHUB_ENV"
+
       - name: Build debug APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
       - uses: actions/upload-artifact@v4
         with:
           name: debug-apk
+          path: app/build/outputs/apk/nonRoot/debug/*.apk
+          if-no-files-found: error
+
+      - name: Build release APK
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-apk
           path: |
-            app/build/outputs/apk/nonRoot/debug/*.apk
-            app/build/outputs/apk/root/debug/*.apk
+            app/build/outputs/apk/nonRoot/release/*.apk
+            app/build/outputs/apk/root/release/*.apk
           if-no-files-found: error

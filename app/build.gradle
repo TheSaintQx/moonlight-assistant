@@ -139,6 +139,46 @@ android {
             excludes += '/META-INF/*.md'
         }
     }
+
+    // Persistent signing config for both debug and release builds.
+    // Reads from environment variables set by GitHub Actions secrets,
+    // falling back to default debug keystore when not configured.
+    def keystoreFile = System.getenv('KEYSTORE_FILE')
+    def keystorePassword = System.getenv('KEYSTORE_PASSWORD')
+    def keystoreAlias = System.getenv('KEYSTORE_ALIAS')
+
+    def hasKeystore = keystoreFile != null && new File(keystoreFile).exists()
+    def signingCfg = hasKeystore ? {
+        storeFile file(keystoreFile)
+        storePassword keystorePassword
+        keyAlias keystoreAlias
+        keyPassword keystorePassword
+    } : null
+
+    if (signingCfg != null) {
+        signingConfigs {
+            custom {
+                signingCfg()
+            }
+        }
+        buildTypes {
+            debug {
+                signingConfig signingConfigs.custom
+                applicationIdSuffix ".debug"
+                resValue "string", "app_label", "Лунный Ассистент Игр (Debug)"
+                resValue "string", "app_label_root", "Лунный Ассистент Игр (Root Debug)"
+            }
+            release {
+                signingConfig signingConfigs.custom
+                applicationIdSuffix ".unofficial"
+                resValue "string", "app_label", "Лунный Ассистент Игр"
+                resValue "string", "app_label_root", "Лунный Ассистент Игр (Root)"
+
+                minifyEnabled true
+                proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            }
+        }
+    }
 }
 
 dependencies {
