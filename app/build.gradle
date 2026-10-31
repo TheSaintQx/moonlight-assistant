@@ -148,17 +148,14 @@ android {
     def keystoreAlias = System.getenv('KEYSTORE_ALIAS')
 
     def hasKeystore = keystoreFile != null && new File(keystoreFile).exists()
-    def signingCfg = hasKeystore ? {
-        storeFile file(keystoreFile)
-        storePassword keystorePassword
-        keyAlias keystoreAlias
-        keyPassword keystorePassword
-    } : null
 
-    if (signingCfg != null) {
+    if (hasKeystore) {
         signingConfigs {
             custom {
-                signingCfg()
+                storeFile file(keystoreFile)
+                storePassword keystorePassword
+                keyAlias keystoreAlias
+                keyPassword keystorePassword
             }
         }
         buildTypes {
