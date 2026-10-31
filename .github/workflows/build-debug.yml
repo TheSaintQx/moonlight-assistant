@@ -47,8 +47,8 @@ jobs:
 
       - name: Set up keystore for signing
         run: |
-          echo "$KEYSTORE_BASE64" | base64 -d > release.keystore
-          echo "KEYSTORE_FILE=$GITHUB_WORKSPACE/release.keystore" >> "$GITHUB_ENV"
+          echo "$KEYSTORE_BASE64" | base64 -d > app/release.keystore
+          echo "KEYSTORE_FILE=app/release.keystore" >> "$GITHUB_ENV"
           echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
           echo "KEYSTORE_ALIAS=$KEYSTORE_ALIAS" >> "$GITHUB_ENV"
 
