@@ -8,6 +8,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    env:
+      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,12 +45,13 @@ jobs:
             exit 1
           fi
 
-      - name: Set up keystore for signing
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Decode keystore from secret
         run: |
-          echo "$KEYSTORE_BASE64" | base64 -d > "$GITHUB_WORKSPACE/release.keystore"
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > "$GITHUB_WORKSPACE/release.keystore"
           echo "KEYSTORE_FILE=$GITHUB_WORKSPACE/release.keystore" >> "$GITHUB_ENV"
-          echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
-          echo "KEYSTORE_ALIAS=$KEYSTORE_ALIAS" >> "$GITHUB_ENV"
 
       - name: Build debug APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
