@@ -84,8 +84,6 @@ android {
     buildTypes {
         debug {
             applicationIdSuffix ".debug"
-            resValue "string", "app_label", "Moonlight (Debug)"
-            resValue "string", "app_label_root", "Moonlight (Root Debug)"
         }
         release {
             // To whomever is releasing/using an APK in release mode with
