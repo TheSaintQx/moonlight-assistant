@@ -42,3 +42,4 @@ app/.externalNativeBuild/
 
 # NDK stuff
 .cxx/release.keystore
+release.keystore
