@@ -152,7 +152,7 @@ android {
     if (hasKeystore) {
         signingConfigs {
             custom {
-                storeFile file(keystoreFile)
+                storeFile new File(keystoreFile)
                 storePassword keystorePassword
                 keyAlias keystoreAlias
                 keyPassword keystorePassword
