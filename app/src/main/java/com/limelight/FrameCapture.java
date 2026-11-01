@@ -213,7 +213,7 @@ public class FrameCapture {
         PixelCopy.request(view, target,
                 new PixelCopy.OnPixelCopyFinishedListener() {
                     @Override
-                    public void onCopyFinished(int copyResult) {
+                    public void onPixelCopyFinished(int copyResult) {
                         result[0] = copyResult;
                         latch.countDown();
                     }
