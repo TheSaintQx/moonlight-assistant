@@ -8,7 +8,7 @@ import android.os.HandlerThread;
 import android.os.Looper;
 import android.util.Log;
 import android.view.PixelCopy;
-import android.view.View;
+import android.view.SurfaceView;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -32,7 +32,7 @@ public class FrameCapture {
     private static final int MAX_FILES = 20;
 
     private final Activity activity;
-    private final View surfaceView;
+    private final SurfaceView surfaceView;
     private final HandlerThread workerThread;
     private final Handler handler;
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -41,7 +41,7 @@ public class FrameCapture {
     private Method sysPropMethod = null;
     private Class<?> sysPropClass = null;
 
-    public FrameCapture(Activity activity, View surfaceView) {
+    public FrameCapture(Activity activity, SurfaceView surfaceView) {
         this.activity = activity;
         this.surfaceView = surfaceView;
         this.workerThread = new HandlerThread("frame-capture");
@@ -140,15 +140,14 @@ public class FrameCapture {
     }
 
     private boolean captureOnce() {
-        View v = surfaceView;
-        int w = v.getWidth();
-        int h = v.getHeight();
+        int w = surfaceView.getWidth();
+        int h = surfaceView.getHeight();
         if (w <= 0 || h <= 0) {
             Log.w(TAG, "surface not ready yet");
             return false;
         }
         Bitmap full = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-        if (!pixelCopy(v, full)) {
+        if (!pixelCopy(surfaceView, full)) {
             full.recycle();
             return false;
         }
@@ -206,7 +205,7 @@ public class FrameCapture {
         return dir;
     }
 
-    private boolean pixelCopy(View view, Bitmap target) {
+    private boolean pixelCopy(SurfaceView view, Bitmap target) {
         final CountDownLatch latch = new CountDownLatch(1);
         final int[] result = {-1};
         final Handler mainHandler = new Handler(Looper.getMainLooper());
