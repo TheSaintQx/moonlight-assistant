@@ -102,7 +102,12 @@ public class FrameCapture {
             return;
         }
         Log.i(TAG, "capture enabled, interval=" + intervalS + "s, dir=" + captureDir());
-        handler.postDelayed(this::captureLoop, intervalS * 1000L);
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                captureLoop();
+            }
+        }, intervalS * 1000L);
     }
 
     public void stop() {
@@ -125,7 +130,12 @@ public class FrameCapture {
             Log.w(TAG, "captureOnce failed", t);
         }
         if (running.get()) {
-            handler.postDelayed(this::captureLoop, intervalS * 1000L);
+            handler.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    captureLoop();
+                }
+            }, intervalS * 1000L);
         }
     }
 
@@ -200,10 +210,14 @@ public class FrameCapture {
         final CountDownLatch latch = new CountDownLatch(1);
         final int[] result = {-1};
         final Handler mainHandler = new Handler(Looper.getMainLooper());
-        PixelCopy.request(view, target, code -> {
-            result[0] = code;
-            latch.countDown();
-        }, mainHandler);
+        PixelCopy.request(view, target,
+                new PixelCopy.OnPixelCopyFinishedListener() {
+                    @Override
+                    public void onCopyFinished(int copyResult) {
+                        result[0] = copyResult;
+                        latch.countDown();
+                    }
+                }, mainHandler);
         try {
             if (!latch.await(COPY_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
                 Log.w(TAG, "PixelCopy timed out");
