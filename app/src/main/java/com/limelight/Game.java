@@ -139,6 +139,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     private int specialKeyCode = KeyEvent.KEYCODE_UNKNOWN;
     private StreamView streamView;
     private AssistantCaptureManager assistantManager;
+    private FrameCapture frameCapture;
     private long lastAbsTouchUpTime = 0;
     private long lastAbsTouchDownTime = 0;
     private float lastAbsTouchUpX, lastAbsTouchUpY;
@@ -241,6 +242,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         streamView = findViewById(R.id.surfaceView);
         assistantManager = new AssistantCaptureManager(streamView, getIntent().getStringExtra(EXTRA_APP_NAME));
         assistantManager.start();
+        frameCapture = new FrameCapture(this, streamView);
+        frameCapture.start();
         streamView.setOnGenericMotionListener(this);
         streamView.setOnKeyListener(this);
         streamView.setInputCallbacks(this);
@@ -1078,6 +1081,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
         super.onPause();
         if (assistantManager != null) assistantManager.stop();
+        if (frameCapture != null) frameCapture.stop();
     }
 
     @Override
@@ -2707,6 +2711,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     protected void onResume() {
         super.onResume();
         if (assistantManager != null) assistantManager.start();
+        if (frameCapture != null) frameCapture.start();
     }
 }
 
