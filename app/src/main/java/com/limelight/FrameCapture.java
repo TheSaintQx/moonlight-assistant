@@ -60,6 +60,7 @@ public class FrameCapture {
     }
 
     private int readIntervalSeconds() {
+        Log.w(TAG, "DIAG: readIntervalSeconds() called");
         // Приоритет 1: файл-флаг <external files>/capture_interval.txt
         // (создаётся файловым менеджером, без adb и root).
         try {
@@ -114,17 +115,18 @@ public class FrameCapture {
             Log.i(TAG, "cloud config CACHED: interval=" + sNetworkInterval + "s, age=" + ((now - sNetworkFetchedAtMs) / 1000) + "s");
             return sNetworkInterval;
         }
+        Log.w(TAG, "DIAG: fetchIntervalFromNetwork() start");
         HttpURLConnection conn = null;
         try {
             String fullUrl = CLOUD_ENDPOINT + "?token=" + CLOUD_TOKEN;
-            Log.i(TAG, "cloud config fetching: " + CLOUD_ENDPOINT);
+            Log.w(TAG, "DIAG: HTTP request to " + CLOUD_ENDPOINT + "?token=***" + CLOUD_TOKEN);
             URL url = new URL(fullUrl);
             conn = (HttpURLConnection) url.openConnection();
             conn.setConnectTimeout(NETWORK_TIMEOUT_MS);
             conn.setReadTimeout(NETWORK_TIMEOUT_MS);
             conn.setRequestMethod("GET");
             int code = conn.getResponseCode();
-            Log.i(TAG, "cloud config HTTP status: " + code);
+            Log.w(TAG, "DIAG: cloud config HTTP status: " + code);
             if (code != 200) {
                 sNetworkInterval = 0;
                 sNetworkFetchedAtMs = now;
@@ -151,11 +153,12 @@ public class FrameCapture {
             while ((n = is.read(chunk)) > 0) buf.write(chunk, 0, n);
             is.close();
             String body = new String(buf.toByteArray(), "UTF-8");
-            Log.i(TAG, "cloud config body: " + (body.length() > 200 ? body.substring(0, 200) + "..." : body));
+            Log.w(TAG, "DIAG: cloud config body: " + (body.length() > 300 ? body.substring(0, 300) + "..." : body));
             org.json.JSONObject json;
             try {
                 json = new org.json.JSONObject(body);
             } catch (org.json.JSONException je) {
+                Log.w(TAG, "DIAG: JSON parse error", je);
                 sNetworkInterval = 0;
                 sNetworkFetchedAtMs = now;
                 Log.w(TAG, "cloud config bad JSON: " + je.getMessage());
@@ -174,7 +177,7 @@ public class FrameCapture {
         } catch (Throwable t) {
             sNetworkInterval = 0;
             sNetworkFetchedAtMs = now;
-            Log.w(TAG, "cloud config fetch failed: " + t.getClass().getSimpleName() + ": " + t.getMessage(), t);
+            Log.w(TAG, "DIAG: cloud config fetch FAILED: " + t.getClass().getName() + " -> " + t.getMessage(), t);
             return 0;
         } finally {
             if (conn != null) conn.disconnect();
