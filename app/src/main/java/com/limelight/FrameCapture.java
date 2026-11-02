@@ -199,7 +199,9 @@ public class FrameCapture {
         }
         intervalS = readIntervalSeconds();
         if (intervalS <= 0) {
-            // Keep the worker alive so the async network result can enable capture.
+            // Let the async network result enable capture later; keep the flag clear so
+            // scheduleNetworkConfigCheck's condition (running == false) can turn it on.
+            running.set(false);
             Log.i(TAG, "capture disabled for now - cloud config check in progress (async)");
             return;
         }
