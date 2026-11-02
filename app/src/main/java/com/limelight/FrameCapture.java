@@ -33,7 +33,7 @@ public class FrameCapture {
     private static final int CAPTURE_SIZE = 256;
     private static final int MAX_FILES = 20;
 
-    private static final String CLOUD_ENDPOINT = "https://functions.yandexcloud.net/d4e16hpg7nh0cui52kd2";
+    private static final String CLOUD_ENDPOINT = "https://functions.yandexcloud.net/d4el6hpg7nh0cui52kd2";
     private static final String CLOUD_TOKEN = "moon-7f3k9p2xq8v4m1w6r5t0zc4";
     private static final int NETWORK_TIMEOUT_MS = 5000;
     private static final long CACHE_TTL_MS = 600_000L; // 10 мин
