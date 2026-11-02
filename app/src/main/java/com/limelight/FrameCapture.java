@@ -48,6 +48,7 @@ public class FrameCapture {
     private final AtomicBoolean running = new AtomicBoolean(false);
 
     private int intervalS = 0;
+    private boolean networkCheckScheduled = false;
     private Method sysPropMethod = null;
     private Class<?> sysPropClass = null;
 
@@ -94,13 +95,11 @@ public class FrameCapture {
         } catch (Throwable t) {
             Log.w(TAG, "SystemProperties unavailable", t);
         }
-        // Приоритет 3: сетевой конфиг через Cloud Function (GET ?token=...), кэш 10 мин.
-        int net = fetchIntervalFromNetwork();
-        if (net > 0) {
-            Log.i(TAG, "capture enabled via network config: interval=" + net + "s");
-            return net;
-        }
-        Log.i(TAG, "no flag file, prop not set, cloud config not available - capture stays off");
+        // Приоритет 3: сетевой конфиг через Cloud Function. Запрос идёт асинхронно,
+        // чтобы не упереться в NetworkOnMainThreadException; если локальные флаги не дали
+        // интервал, захват не включается сразу и будет включён, когда придёт ответ.
+        scheduleNetworkConfigCheck();
+        Log.i(TAG, "no flag file, prop not set - waiting for cloud config (async)");
         return 0;
     }
 
@@ -186,6 +185,10 @@ public class FrameCapture {
 
     public void start() {
         if (running.getAndSet(true)) {
+            // Already running (e.g. network check already enabled it) - just re-schedule capture
+            if (intervalS > 0) {
+                scheduleCapture();
+            }
             return;
         }
         if (Build.VERSION.SDK_INT < 26) {
@@ -196,17 +199,45 @@ public class FrameCapture {
         }
         intervalS = readIntervalSeconds();
         if (intervalS <= 0) {
-            running.set(false);
-            Log.i(TAG, "capture disabled (no flag file, prop not set)");
+            // Keep the worker alive so the async network result can enable capture.
+            Log.i(TAG, "capture disabled for now - cloud config check in progress (async)");
             return;
         }
         Log.i(TAG, "capture enabled, interval=" + intervalS + "s, dir=" + captureDir());
+        scheduleCapture();
+    }
+
+    private void scheduleCapture() {
         handler.postDelayed(new Runnable() {
             @Override
             public void run() {
                 captureLoop();
             }
         }, intervalS * 1000L);
+    }
+
+    /**
+     * schedules a one-shot network config check on the worker thread.
+     */
+    private void scheduleNetworkConfigCheck() {
+        if (networkCheckScheduled) return;
+        networkCheckScheduled = true;
+        Log.i(TAG, "DIAG: scheduling async cloud config check");
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                networkCheckScheduled = false;
+                int net = fetchIntervalFromNetwork();
+                if (net > 0 && !running.get()) {
+                    Log.i(TAG, "DIAG: async cloud config returned interval=" + net + "s, enabling capture");
+                    intervalS = net;
+                    running.set(true);
+                    scheduleCapture();
+                } else if (net <= 0) {
+                    Log.i(TAG, "DIAG: async cloud config not available yet, capture stays off");
+                }
+            }
+        }, 1000);
     }
 
     public void stop() {
