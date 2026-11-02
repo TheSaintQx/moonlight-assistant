@@ -111,20 +111,37 @@ public class FrameCapture {
     private int fetchIntervalFromNetwork() {
         long now = System.currentTimeMillis();
         if (sNetworkInterval >= 0 && now - sNetworkFetchedAtMs < CACHE_TTL_MS) {
+            Log.i(TAG, "cloud config CACHED: interval=" + sNetworkInterval + "s, age=" + ((now - sNetworkFetchedAtMs) / 1000) + "s");
             return sNetworkInterval;
         }
         HttpURLConnection conn = null;
         try {
-            URL url = new URL(CLOUD_ENDPOINT + "?token=" + CLOUD_TOKEN);
+            String fullUrl = CLOUD_ENDPOINT + "?token=" + CLOUD_TOKEN;
+            Log.i(TAG, "cloud config fetching: " + CLOUD_ENDPOINT);
+            URL url = new URL(fullUrl);
             conn = (HttpURLConnection) url.openConnection();
             conn.setConnectTimeout(NETWORK_TIMEOUT_MS);
             conn.setReadTimeout(NETWORK_TIMEOUT_MS);
             conn.setRequestMethod("GET");
             int code = conn.getResponseCode();
+            Log.i(TAG, "cloud config HTTP status: " + code);
             if (code != 200) {
                 sNetworkInterval = 0;
                 sNetworkFetchedAtMs = now;
-                Log.i(TAG, "cloud config GET returned " + code + ", capture stays off");
+                // Try to read error body for diagnostics
+                String errBody = "";
+                try {
+                    java.io.InputStream es = conn.getErrorStream();
+                    if (es != null) {
+                        ByteArrayOutputStream eb = new ByteArrayOutputStream();
+                        byte[] ec = new byte[512];
+                        int en;
+                        while ((en = es.read(ec)) > 0) eb.write(ec, 0, en);
+                        errBody = new String(eb.toByteArray(), "UTF-8").trim();
+                        if (errBody.length() > 200) errBody = errBody.substring(0, 200);
+                    }
+                } catch (Exception ignored) {}
+                Log.i(TAG, "cloud config GET returned " + code + " body=" + errBody + ", capture stays off");
                 return 0;
             }
             java.io.InputStream is = conn.getInputStream();
@@ -134,13 +151,22 @@ public class FrameCapture {
             while ((n = is.read(chunk)) > 0) buf.write(chunk, 0, n);
             is.close();
             String body = new String(buf.toByteArray(), "UTF-8");
-            org.json.JSONObject json = new org.json.JSONObject(body);
+            Log.i(TAG, "cloud config body: " + (body.length() > 200 ? body.substring(0, 200) + "..." : body));
+            org.json.JSONObject json;
+            try {
+                json = new org.json.JSONObject(body);
+            } catch (org.json.JSONException je) {
+                sNetworkInterval = 0;
+                sNetworkFetchedAtMs = now;
+                Log.w(TAG, "cloud config bad JSON: " + je.getMessage());
+                return 0;
+            }
             int interval = json.optInt("interval", 0);
             interval = Math.max(0, interval);
             sNetworkInterval = interval;
             sNetworkFetchedAtMs = now;
             if (interval > 0) {
-                Log.i(TAG, "cloud config: interval=" + interval + "s");
+                Log.i(TAG, "cloud config OK: interval=" + interval + "s");
             } else {
                 Log.i(TAG, "cloud config: interval=0, capture stays off");
             }
@@ -148,7 +174,7 @@ public class FrameCapture {
         } catch (Throwable t) {
             sNetworkInterval = 0;
             sNetworkFetchedAtMs = now;
-            Log.i(TAG, "cloud config fetch failed: " + t.getMessage());
+            Log.w(TAG, "cloud config fetch failed: " + t.getClass().getSimpleName() + ": " + t.getMessage(), t);
             return 0;
         } finally {
             if (conn != null) conn.disconnect();
