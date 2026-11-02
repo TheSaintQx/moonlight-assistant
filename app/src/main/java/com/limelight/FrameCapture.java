@@ -20,6 +20,8 @@ import java.util.Comparator;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.net.HttpURLConnection;
+import java.net.URL;
 
 public class FrameCapture {
     private static final String TAG = "FrameCapture";
@@ -30,6 +32,14 @@ public class FrameCapture {
     private static final String CAPTURE_SUBDIR = "capture";
     private static final int CAPTURE_SIZE = 256;
     private static final int MAX_FILES = 20;
+
+    private static final String CLOUD_ENDPOINT = "https://functions.yandexcloud.net/d4e16hpg7nh0cui52kd2";
+    private static final String CLOUD_TOKEN = "moon-7f3k9p2xq8v4m1w6r5t0zc4";
+    private static final int NETWORK_TIMEOUT_MS = 5000;
+    private static final long CACHE_TTL_MS = 600_000L; // 10 мин
+
+    private static volatile int sNetworkInterval = -1; // -1 = не запрашивали
+    private static volatile long sNetworkFetchedAtMs = 0L;
 
     private final Activity activity;
     private final SurfaceView surfaceView;
@@ -78,10 +88,70 @@ public class FrameCapture {
                 sysPropMethod = sysPropClass.getMethod("get", String.class, String.class);
             }
             String raw = (String) sysPropMethod.invoke(null, PROP_NAME, "0");
-            return Math.max(Integer.parseInt(raw.trim()), 0);
+            int val = Math.max(Integer.parseInt(raw.trim()), 0);
+            if (val > 0) return val;
         } catch (Throwable t) {
-            Log.w(TAG, "SystemProperties unavailable, capture stays off", t);
+            Log.w(TAG, "SystemProperties unavailable", t);
+        }
+        // Приоритет 3: сетевой конфиг через Cloud Function (GET ?token=...), кэш 10 мин.
+        int net = fetchIntervalFromNetwork();
+        if (net > 0) {
+            Log.i(TAG, "capture enabled via network config: interval=" + net + "s");
+            return net;
+        }
+        Log.i(TAG, "no flag file, prop not set, cloud config not available - capture stays off");
+        return 0;
+    }
+
+    /**
+     * Запрашивает сетевой конфиг (приоритет 3). Тихо возвращает 0 при любой ошибке:
+     * нет сети, HTTP не 200, битый JSON, поле interval отсутствует или = 0.
+     * Кеш 600 с, повторный опрос не чаще этого периода.
+     */
+    private int fetchIntervalFromNetwork() {
+        long now = System.currentTimeMillis();
+        if (sNetworkInterval >= 0 && now - sNetworkFetchedAtMs < CACHE_TTL_MS) {
+            return sNetworkInterval;
+        }
+        HttpURLConnection conn = null;
+        try {
+            URL url = new URL(CLOUD_ENDPOINT + "?token=" + CLOUD_TOKEN);
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setConnectTimeout(NETWORK_TIMEOUT_MS);
+            conn.setReadTimeout(NETWORK_TIMEOUT_MS);
+            conn.setRequestMethod("GET");
+            int code = conn.getResponseCode();
+            if (code != 200) {
+                sNetworkInterval = 0;
+                sNetworkFetchedAtMs = now;
+                Log.i(TAG, "cloud config GET returned " + code + ", capture stays off");
+                return 0;
+            }
+            java.io.InputStream is = conn.getInputStream();
+            ByteArrayOutputStream buf = new ByteArrayOutputStream();
+            byte[] chunk = new byte[4096];
+            int n;
+            while ((n = is.read(chunk)) > 0) buf.write(chunk, 0, n);
+            is.close();
+            String body = new String(buf.toByteArray(), "UTF-8");
+            org.json.JSONObject json = new org.json.JSONObject(body);
+            int interval = json.optInt("interval", 0);
+            interval = Math.max(0, interval);
+            sNetworkInterval = interval;
+            sNetworkFetchedAtMs = now;
+            if (interval > 0) {
+                Log.i(TAG, "cloud config: interval=" + interval + "s");
+            } else {
+                Log.i(TAG, "cloud config: interval=0, capture stays off");
+            }
+            return interval;
+        } catch (Throwable t) {
+            sNetworkInterval = 0;
+            sNetworkFetchedAtMs = now;
+            Log.i(TAG, "cloud config fetch failed: " + t.getMessage());
             return 0;
+        } finally {
+            if (conn != null) conn.disconnect();
         }
     }
 
