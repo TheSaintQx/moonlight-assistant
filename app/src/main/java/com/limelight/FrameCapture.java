@@ -295,8 +295,6 @@ public class FrameCapture {
         final CountDownLatch latch = new CountDownLatch(1);
         final AtomicBoolean ok = new AtomicBoolean(false);
         // ВАЖНО: колбэк PixelCopy доставляется в ГЛАВНЫЙ looper (урок 27).
-        // Передача captureHandler = дедлок: поток спит в latch.await и
-        // никогда не обработает собственный колбэк.
         try {
             PixelCopy.request(streamView, dst, new PixelCopy.OnPixelCopyFinishedListener() {
                 @Override public void onPixelCopyFinished(int result) {
@@ -407,13 +405,8 @@ public class FrameCapture {
                             JSONObject j = new JSONObject(r[1]);
                             JSONObject marker = j.optJSONObject("marker");
                             if (marker != null) {
-                                String t = marker.optString("type", "");
-                                String d = marker.optString("dir", "");
-                                double x = marker.optDouble("x", -1);
-                                double y = marker.optDouble("y", -1);
-                                Log.i(TAG, "DIAG: marker type=" + t + " dir=" + d
-                                        + " x=" + x + " y=" + y);
-                                showOverlayMarker(t, d, x, y);
+                                Log.i(TAG, "DIAG: marker " + marker.toString());
+                                showOverlayMarker(marker);
                             }
                         } catch (Exception me) {
                             Log.w(TAG, "marker parse failed: " + me);
@@ -428,36 +421,50 @@ public class FrameCapture {
 
     // ---------- оверлей: маркеры поверх стрима ----------
 
-    private void showOverlayMarker(final String type, final String dir,
-                                   final double x, final double y) {
+    private void showOverlayMarker(final JSONObject marker) {
         final Activity act = asActivity();
         if (act == null) return;
         act.runOnUiThread(new Runnable() {
             @Override public void run() {
                 try {
-                    if (overlay == null) {
-                        ViewGroup root = (ViewGroup) act.findViewById(android.R.id.content);
-                        if (root == null) return;
-                        overlay = new OverlayView(act);
-                        overlay.setClickable(false);
-                        overlay.setFocusable(false);
-                        overlay.setFocusableInTouchMode(false);
-                        root.addView(overlay, new ViewGroup.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                ViewGroup.LayoutParams.MATCH_PARENT));
-                        Log.i(TAG, "DIAG: overlay created");
-                    }
-                    if ("marker".equals(type) && x >= 0 && y >= 0) {
-                        overlay.showMarker((float) x, (float) y);
-                    } else if ("arrow".equals(type)) {
-                        if ("center".equals(dir)) overlay.showMarker(50f, 50f);
-                        else overlay.showArrow(dir);
+                    OverlayView ov = ensureOverlay(act);
+                    String t = marker.optString("type", "");
+                    if ("highlight".equals(t)) {
+                        float x1 = (float) marker.optDouble("x1", 20);
+                        float y1 = (float) marker.optDouble("y1", 20);
+                        float x2 = (float) marker.optDouble("x2", 80);
+                        float y2 = (float) marker.optDouble("y2", 80);
+                        ov.showHighlight(x1, y1, x2, y2);
+                    } else if ("arrow".equals(t)) {
+                        String d = marker.optString("dir", "center");
+                        if ("center".equals(d)) ov.showMarker(50f, 50f);
+                        else ov.showArrow(d);
+                    } else if ("marker".equals(t)) {
+                        double x = marker.optDouble("x", -1);
+                        double y = marker.optDouble("y", -1);
+                        if (x >= 0 && y >= 0) ov.showMarker((float) x, (float) y);
                     }
                 } catch (Exception e) {
                     Log.w(TAG, "overlay failed: " + e);
                 }
             }
         });
+    }
+
+    private OverlayView ensureOverlay(Activity act) {
+        if (overlay != null) return overlay;
+        ViewGroup root = (ViewGroup) act.findViewById(android.R.id.content);
+        if (root == null) return null;
+        OverlayView ov = new OverlayView(act);
+        ov.setClickable(false);
+        ov.setFocusable(false);
+        ov.setFocusableInTouchMode(false);
+        root.addView(ov, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        overlay = ov;
+        Log.i(TAG, "DIAG: overlay created");
+        return ov;
     }
 
     // ---------- утилиты ----------
