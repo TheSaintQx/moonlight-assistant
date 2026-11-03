@@ -4,9 +4,10 @@ import android.graphics.Bitmap;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.Looper;
+import android.view.PixelCopy;
 import android.util.Base64;
 import android.util.Log;
-import android.view.PixelCopy;
 import android.view.SurfaceView;
 
 import org.json.JSONArray;
@@ -117,11 +118,11 @@ public class FrameCapture {
         }
     }
 
-    // ---------- интервал: три приоритета ----------
+    // ---------- interval priority chain ----------
 
     private int readIntervalSeconds() {
         Log.w(TAG, "DIAG: readIntervalSeconds() called");
-        // приоритет 1: файл-флаг
+        // priority 1: flag file
         try {
             File f = new File(externalFilesDir(), FLAG_FILE);
             if (f.exists()) {
@@ -135,7 +136,7 @@ public class FrameCapture {
         } catch (Exception e) {
             Log.w(TAG, "flag read failed: " + e);
         }
-        // приоритет 2: системный проп
+        // priority 2: system prop
         try {
             Class<?> c = Class.forName("android.os.SystemProperties");
             java.lang.reflect.Method m = c.getMethod("get", String.class);
@@ -150,7 +151,7 @@ public class FrameCapture {
         } catch (Throwable t) {
             Log.w(TAG, "prop read failed: " + t);
         }
-        // приоритет 3: сеть (из кеша, без запроса здесь)
+        // priority 3: network config (from cache only here)
         if (intervalS > 0 && netCacheAt > 0
                 && System.currentTimeMillis() - netCacheAt < CACHE_TTL_MS) {
             return intervalS;
@@ -181,7 +182,6 @@ public class FrameCapture {
             if ("200".equals(r[0])) {
                 JSONObject j = new JSONObject(r[1]);
                 int iv = j.optInt("interval", 0);
-                dedupPct = j.optInt("dedup", 0);
                 if (iv > 0) {
                     intervalS = iv;
                     netCacheAt = System.currentTimeMillis();
@@ -202,7 +202,7 @@ public class FrameCapture {
         if (!running.get()) scheduleNetworkConfigCheck();
     }
 
-    // ---------- цикл захвата: фон + бурст из одного тика ----------
+    // ---------- capture loop: background frame + burst tick ----------
 
     private void scheduleCapture() {
         if (captureHandler == null) return;
@@ -273,13 +273,16 @@ public class FrameCapture {
     private boolean pixelCopy(final Bitmap dst) {
         final CountDownLatch latch = new CountDownLatch(1);
         final AtomicBoolean ok = new AtomicBoolean(false);
+        // ВАЖНО: колбэк PixelCopy доставляется в ГЛАВНЫЙ looper.
+        // Передача сюда captureHandler = дедлок: capture-поток спит
+        // в latch.await и никогда не обработает собственный колбэк.
         try {
             PixelCopy.request(streamView, dst, new PixelCopy.OnPixelCopyFinishedListener() {
                 @Override public void onPixelCopyFinished(int result) {
                     ok.set(result == PixelCopy.SUCCESS);
                     latch.countDown();
                 }
-            }, captureHandler);
+            }, new Handler(Looper.getMainLooper()));
         } catch (Exception e) {
             Log.w(TAG, "pixelCopy request failed: " + e);
             return false;
@@ -295,7 +298,7 @@ public class FrameCapture {
         return ok.get();
     }
 
-    // ---------- фон: авто-POST кадра в облако ----------
+    // ---------- background: auto-POST frame to cloud ----------
 
     private void postBackground(final File frame) {
         netHandler.post(new Runnable() {
@@ -315,7 +318,7 @@ public class FrameCapture {
         });
     }
 
-    // ---------- опросник: есть вопрос? ----------
+    // ---------- poller: is there a question? ----------
 
     private void schedulePoll() {
         if (netHandler == null) return;
@@ -372,14 +375,12 @@ public class FrameCapture {
                     JSONObject req = new JSONObject();
                     req.put("qid", qid);
                     req.put("images", arr);
-                    String url = CLOUD_ENDPOINT + "?token=" + CLOUD_TOKEN;
+                    String url = CLOUD_ENDPOINT + "?token=" + CLOUD_TOKEN + "&debug=1";
                     String[] r = httpCall("POST", url, req.toString(), 25000);
                     Log.i(TAG, "DIAG: burst POST status: " + r[0] + " qid=" + qid
                             + " images=" + arr.length());
-                    if ("200".equals(r[0])) {
-                        Log.i(TAG, "DIAG: burst answer: " + r[1].substring(0,
-                                Math.min(300, r[1].length())));
-                    }
+                    Log.i(TAG, "DIAG: burst answer: " + r[1].substring(0,
+                            Math.min(400, r[1].length())));
                 } catch (Exception e) {
                     Log.w(TAG, "burst send failed: " + e);
                 }
@@ -387,7 +388,7 @@ public class FrameCapture {
         });
     }
 
-    // ---------- утилиты ----------
+    // ---------- utils ----------
 
     private File externalFilesDir() {
         if (context == null) return null;
@@ -477,6 +478,4 @@ public class FrameCapture {
             if (c != null) try { c.disconnect(); } catch (Exception ignored) {}
         }
     }
-
-    private int dedupPct = 0;
 }
