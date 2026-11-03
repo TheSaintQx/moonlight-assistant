@@ -1,367 +1,482 @@
 package com.limelight;
 
-import android.app.Activity;
 import android.graphics.Bitmap;
+import android.graphics.PixelCopy;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
-import android.os.Looper;
+import android.util.Base64;
 import android.util.Log;
-import android.view.PixelCopy;
 import android.view.SurfaceView;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.lang.reflect.Method;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.net.HttpURLConnection;
-import java.net.URL;
 
 public class FrameCapture {
     private static final String TAG = "FrameCapture";
-    private static final String PROP_NAME = "debug.moonlight.capture";
     private static final String FLAG_FILE = "capture_interval.txt";
-    private static final int JPEG_QUALITY = 85;
-    private static final long COPY_TIMEOUT_MS = 2000;
-    private static final String CAPTURE_SUBDIR = "capture";
+    private static final String PROP_NAME = "debug.moonlight.capture";
+    private static final String CLOUD_ENDPOINT =
+            "https://functions.yandexcloud.net/d4el6hpg7nh0cui52kd2";
+    private static final String CLOUD_TOKEN = "moon-7f3k9p2xq8v4m1w6r5t0zc4";
+    private static final long CACHE_TTL_MS = 600_000L;
+
     private static final int CAPTURE_SIZE = 256;
     private static final int MAX_FILES = 20;
+    private static final int JPEG_QUALITY = 85;
+    private static final long COPY_TIMEOUT_MS = 2000;
+    private static final long NETWORK_TIMEOUT_MS = 5000;
+    private static final String CAPTURE_SUBDIR = "capture";
+    private static final String BURST_SUBDIR = "burst";
+    private static final int BURST_MAX = 15;
+    private static final long BURST_INTERVAL_MS = 3000;
+    private static final long POLL_INTERVAL_MS = 1500;
 
-    private static final String CLOUD_ENDPOINT = "https://functions.yandexcloud.net/d4el6hpg7nh0cui52kd2";
-    private static final String CLOUD_TOKEN = "moon-7f3k9p2xq8v4m1w6r5t0zc4";
-    private static final int NETWORK_TIMEOUT_MS = 5000;
-    private static final long CACHE_TTL_MS = 600_000L; // 10 мин
-
-    private static volatile int sNetworkInterval = -1; // -1 = не запрашивали
-    private static volatile long sNetworkFetchedAtMs = 0L;
-
-    private final Activity activity;
-    private final SurfaceView surfaceView;
-    private final HandlerThread workerThread;
-    private final Handler handler;
+    private final SurfaceView streamView;
+    private final android.content.Context context;
     private final AtomicBoolean running = new AtomicBoolean(false);
 
+    private Handler captureHandler;
+    private Handler netHandler;
+    private HandlerThread captureThread;
+    private HandlerThread netThread;
     private int intervalS = 0;
-    private boolean networkCheckScheduled = false;
-    private Method sysPropMethod = null;
-    private Class<?> sysPropClass = null;
+    private long netCacheAt = 0;
+    private long lastBgCaptureAt = 0;
+    private long lastBurstCaptureAt = 0;
+    private int lastSentQid = 0;
 
-    public FrameCapture(Activity activity, SurfaceView surfaceView) {
-        this.activity = activity;
-        this.surfaceView = surfaceView;
-        this.workerThread = new HandlerThread("frame-capture");
-        this.workerThread.start();
-        this.handler = new Handler(workerThread.getLooper());
+    public FrameCapture(Object owner, SurfaceView view) {
+        this.streamView = view;
+        this.context = (owner instanceof android.content.Context)
+                ? (android.content.Context) owner : null;
     }
 
-    private int readIntervalSeconds() {
-        Log.w(TAG, "DIAG: readIntervalSeconds() called");
-        // Приоритет 1: файл-флаг <external files>/capture_interval.txt
-        // (создаётся файловым менеджером, без adb и root).
-        try {
-            File base = activity.getExternalFilesDir(null);
-            if (base != null) {
-                File flag = new File(base, FLAG_FILE);
-                if (flag.exists()) {
-                    FileInputStream fin = new FileInputStream(flag);
-                    ByteArrayOutputStream buf = new ByteArrayOutputStream();
-                    byte[] b = new byte[64];
-                    int n;
-                    while ((n = fin.read(b)) > 0) {
-                        buf.write(b, 0, n);
-                    }
-                    fin.close();
-                    return Math.max(Integer.parseInt(buf.toString("UTF-8").trim()), 0);
-                }
-            }
-        } catch (Throwable t) {
-            Log.w(TAG, "flag file unreadable, falling back to prop", t);
-        }
-        // Приоритет 2: системный проп debug.moonlight.capture (adb setprop).
-        try {
-            if (sysPropClass == null) {
-                sysPropClass = Class.forName("android.os.SystemProperties");
-                sysPropMethod = sysPropClass.getMethod("get", String.class, String.class);
-            }
-            String raw = (String) sysPropMethod.invoke(null, PROP_NAME, "0");
-            int val = Math.max(Integer.parseInt(raw.trim()), 0);
-            if (val > 0) return val;
-        } catch (Throwable t) {
-            Log.w(TAG, "SystemProperties unavailable", t);
-        }
-        // Приоритет 3: сетевой конфиг через Cloud Function. Запрос идёт асинхронно,
-        // чтобы не упереться в NetworkOnMainThreadException; если локальные флаги не дали
-        // интервал, захват не включается сразу и будет включён, когда придёт ответ.
-        scheduleNetworkConfigCheck();
-        Log.i(TAG, "no flag file, prop not set - waiting for cloud config (async)");
-        return 0;
-    }
-
-    /**
-     * Запрашивает сетевой конфиг (приоритет 3). Тихо возвращает 0 при любой ошибке:
-     * нет сети, HTTP не 200, битый JSON, поле interval отсутствует или = 0.
-     * Кеш 600 с, повторный опрос не чаще этого периода.
-     */
-    private int fetchIntervalFromNetwork() {
-        long now = System.currentTimeMillis();
-        if (sNetworkInterval >= 0 && now - sNetworkFetchedAtMs < CACHE_TTL_MS) {
-            Log.i(TAG, "cloud config CACHED: interval=" + sNetworkInterval + "s, age=" + ((now - sNetworkFetchedAtMs) / 1000) + "s");
-            return sNetworkInterval;
-        }
-        Log.w(TAG, "DIAG: fetchIntervalFromNetwork() start");
-        HttpURLConnection conn = null;
-        try {
-            String fullUrl = CLOUD_ENDPOINT + "?token=" + CLOUD_TOKEN;
-            Log.w(TAG, "DIAG: HTTP request to " + CLOUD_ENDPOINT + "?token=***" + CLOUD_TOKEN);
-            URL url = new URL(fullUrl);
-            conn = (HttpURLConnection) url.openConnection();
-            conn.setConnectTimeout(NETWORK_TIMEOUT_MS);
-            conn.setReadTimeout(NETWORK_TIMEOUT_MS);
-            conn.setRequestMethod("GET");
-            int code = conn.getResponseCode();
-            Log.w(TAG, "DIAG: cloud config HTTP status: " + code);
-            if (code != 200) {
-                sNetworkInterval = 0;
-                sNetworkFetchedAtMs = now;
-                // Try to read error body for diagnostics
-                String errBody = "";
-                try {
-                    java.io.InputStream es = conn.getErrorStream();
-                    if (es != null) {
-                        ByteArrayOutputStream eb = new ByteArrayOutputStream();
-                        byte[] ec = new byte[512];
-                        int en;
-                        while ((en = es.read(ec)) > 0) eb.write(ec, 0, en);
-                        errBody = new String(eb.toByteArray(), "UTF-8").trim();
-                        if (errBody.length() > 200) errBody = errBody.substring(0, 200);
-                    }
-                } catch (Exception ignored) {}
-                Log.i(TAG, "cloud config GET returned " + code + " body=" + errBody + ", capture stays off");
-                return 0;
-            }
-            java.io.InputStream is = conn.getInputStream();
-            ByteArrayOutputStream buf = new ByteArrayOutputStream();
-            byte[] chunk = new byte[4096];
-            int n;
-            while ((n = is.read(chunk)) > 0) buf.write(chunk, 0, n);
-            is.close();
-            String body = new String(buf.toByteArray(), "UTF-8");
-            Log.w(TAG, "DIAG: cloud config body: " + (body.length() > 300 ? body.substring(0, 300) + "..." : body));
-            org.json.JSONObject json;
-            try {
-                json = new org.json.JSONObject(body);
-            } catch (org.json.JSONException je) {
-                Log.w(TAG, "DIAG: JSON parse error", je);
-                sNetworkInterval = 0;
-                sNetworkFetchedAtMs = now;
-                Log.w(TAG, "cloud config bad JSON: " + je.getMessage());
-                return 0;
-            }
-            int interval = json.optInt("interval", 0);
-            interval = Math.max(0, interval);
-            sNetworkInterval = interval;
-            sNetworkFetchedAtMs = now;
-            if (interval > 0) {
-                Log.i(TAG, "cloud config OK: interval=" + interval + "s");
-            } else {
-                Log.i(TAG, "cloud config: interval=0, capture stays off");
-            }
-            return interval;
-        } catch (Throwable t) {
-            sNetworkInterval = 0;
-            sNetworkFetchedAtMs = now;
-            Log.w(TAG, "DIAG: cloud config fetch FAILED: " + t.getClass().getName() + " -> " + t.getMessage(), t);
-            return 0;
-        } finally {
-            if (conn != null) conn.disconnect();
-        }
-    }
+    // ---------- lifecycle ----------
 
     public void start() {
         if (running.getAndSet(true)) {
-            // Already running (e.g. network check already enabled it) - just re-schedule capture
-            if (intervalS > 0) {
-                scheduleCapture();
-            }
+            scheduleCapture();
             return;
         }
-        if (Build.VERSION.SDK_INT < 26) {
-            running.set(false);
-            Log.i(TAG, "PixelCopy requires API 26+, capture disabled (sdk="
-                    + Build.VERSION.SDK_INT + ")");
-            return;
-        }
+        ensureThreads();
         intervalS = readIntervalSeconds();
-        if (intervalS <= 0) {
-            // Let the async network result enable capture later; keep the flag clear so
-            // scheduleNetworkConfigCheck's condition (running == false) can turn it on.
+        if (intervalS > 0) {
+            Log.i(TAG, "capture enabled, interval=" + intervalS + "s, dir=" + captureDir());
+            scheduleCapture();
+            schedulePoll();
+        } else {
             running.set(false);
+            Log.i(TAG, "no flag file, prop not set - waiting for cloud config (async)");
             Log.i(TAG, "capture disabled for now - cloud config check in progress (async)");
-            return;
+            scheduleNetworkConfigCheck();
         }
-        Log.i(TAG, "capture enabled, interval=" + intervalS + "s, dir=" + captureDir());
-        scheduleCapture();
-    }
-
-    private void scheduleCapture() {
-        handler.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                captureLoop();
-            }
-        }, intervalS * 1000L);
-    }
-
-    /**
-     * schedules a one-shot network config check on the worker thread.
-     */
-    private void scheduleNetworkConfigCheck() {
-        if (networkCheckScheduled) return;
-        networkCheckScheduled = true;
-        Log.i(TAG, "DIAG: scheduling async cloud config check");
-        handler.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                networkCheckScheduled = false;
-                int net = fetchIntervalFromNetwork();
-                if (net > 0 && !running.get()) {
-                    Log.i(TAG, "DIAG: async cloud config returned interval=" + net + "s, enabling capture");
-                    intervalS = net;
-                    running.set(true);
-                    scheduleCapture();
-                } else if (net <= 0) {
-                    Log.i(TAG, "DIAG: async cloud config not available yet, capture stays off");
-                }
-            }
-        }, 1000);
     }
 
     public void stop() {
         running.set(false);
-        handler.removeCallbacksAndMessages(null);
+        if (captureHandler != null) captureHandler.removeCallbacksAndMessages(null);
+        if (netHandler != null) netHandler.removeCallbacksAndMessages(null);
     }
 
     public void destroy() {
         stop();
-        workerThread.quitSafely();
+        if (captureThread != null) captureThread.quitSafely();
+        if (netThread != null) netThread.quitSafely();
+        captureThread = null;
+        netThread = null;
+        captureHandler = null;
+        netHandler = null;
     }
 
-    private void captureLoop() {
-        if (!running.get()) {
-            return;
+    private void ensureThreads() {
+        if (captureThread == null) {
+            captureThread = new HandlerThread("moon-capture");
+            captureThread.start();
+            captureHandler = new Handler(captureThread.getLooper());
+        }
+        if (netThread == null) {
+            netThread = new HandlerThread("moon-capture-net");
+            netThread.start();
+            netHandler = new Handler(netThread.getLooper());
+        }
+    }
+
+    // ---------- интервал: три приоритета ----------
+
+    private int readIntervalSeconds() {
+        Log.w(TAG, "DIAG: readIntervalSeconds() called");
+        // приоритет 1: файл-флаг
+        try {
+            File f = new File(externalFilesDir(), FLAG_FILE);
+            if (f.exists()) {
+                String s = readText(f).trim();
+                int v = Integer.parseInt(s);
+                if (v > 0) {
+                    Log.i(TAG, "flag file: interval=" + v + "s");
+                    return v;
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "flag read failed: " + e);
+        }
+        // приоритет 2: системный проп
+        try {
+            Class<?> c = Class.forName("android.os.SystemProperties");
+            java.lang.reflect.Method m = c.getMethod("get", String.class);
+            String v = (String) m.invoke(null, PROP_NAME);
+            if (v != null && !v.trim().isEmpty()) {
+                int n = Integer.parseInt(v.trim());
+                if (n > 0) {
+                    Log.i(TAG, "prop: interval=" + n + "s");
+                    return n;
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "prop read failed: " + t);
+        }
+        // приоритет 3: сеть (из кеша, без запроса здесь)
+        if (intervalS > 0 && netCacheAt > 0
+                && System.currentTimeMillis() - netCacheAt < CACHE_TTL_MS) {
+            return intervalS;
+        }
+        return 0;
+    }
+
+    private void scheduleNetworkConfigCheck() {
+        if (netHandler == null) return;
+        netHandler.removeCallbacks(netConfigRunnable);
+        netHandler.postDelayed(netConfigRunnable, 1000);
+    }
+
+    private final Runnable netConfigRunnable = new Runnable() {
+        @Override public void run() {
+            fetchIntervalFromNetwork();
+        }
+    };
+
+    private void fetchIntervalFromNetwork() {
+        Log.w(TAG, "DIAG: fetchIntervalFromNetwork() start");
+        try {
+            String url = CLOUD_ENDPOINT + "?token=" + CLOUD_TOKEN;
+            Log.w(TAG, "DIAG: HTTP request to " + CLOUD_ENDPOINT + "?token=***");
+            String[] r = httpCall("GET", url, null, (int) NETWORK_TIMEOUT_MS);
+            Log.w(TAG, "DIAG: cloud config HTTP status: " + r[0]);
+            Log.w(TAG, "DIAG: cloud config body: " + r[1]);
+            if ("200".equals(r[0])) {
+                JSONObject j = new JSONObject(r[1]);
+                int iv = j.optInt("interval", 0);
+                dedupPct = j.optInt("dedup", 0);
+                if (iv > 0) {
+                    intervalS = iv;
+                    netCacheAt = System.currentTimeMillis();
+                    Log.i(TAG, "cloud config OK: interval=" + iv + "s");
+                    if (!running.get()) {
+                        Log.i(TAG, "DIAG: async cloud config returned interval="
+                                + iv + "s, enabling capture");
+                        running.set(true);
+                        scheduleCapture();
+                        schedulePoll();
+                    }
+                    return;
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "cloud config failed: " + e);
+        }
+        if (!running.get()) scheduleNetworkConfigCheck();
+    }
+
+    // ---------- цикл захвата: фон + бурст из одного тика ----------
+
+    private void scheduleCapture() {
+        if (captureHandler == null) return;
+        captureHandler.removeCallbacks(captureRunnable);
+        captureHandler.postDelayed(captureRunnable, 1000);
+    }
+
+    private final Runnable captureRunnable = new Runnable() {
+        @Override public void run() {
+            if (!running.get()) return;
+            long now = System.currentTimeMillis();
+            boolean bgDue = lastBgCaptureAt == 0
+                    || now - lastBgCaptureAt >= intervalS * 1000L;
+            boolean burstDue = lastBurstCaptureAt == 0
+                    || now - lastBurstCaptureAt >= BURST_INTERVAL_MS;
+            if (bgDue) {
+                File f = captureOnce(CAPTURE_SUBDIR);
+                if (f != null) {
+                    lastBgCaptureAt = now;
+                    rotate(captureDir(), MAX_FILES);
+                    postBackground(f);
+                }
+            }
+            if (burstDue) {
+                File f2 = captureOnce(BURST_SUBDIR);
+                if (f2 != null) {
+                    lastBurstCaptureAt = now;
+                    rotate(burstDir(), BURST_MAX);
+                }
+            }
+            scheduleCapture();
+        }
+    };
+
+    private File captureOnce(String subdir) {
+        if (Build.VERSION.SDK_INT < 26) {
+            Log.w(TAG, "PixelCopy requires API 26+, capture skipped");
+            return null;
+        }
+        if (streamView == null) return null;
+        int w = CAPTURE_SIZE;
+        int h = 144;
+        try {
+            int sw = streamView.getWidth();
+            int sh = streamView.getHeight();
+            if (sw > 0 && sh > 0) h = Math.max(1, w * sh / sw);
+        } catch (Exception ignored) {
+        }
+        Bitmap dst = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+        if (!pixelCopy(dst)) return null;
+        try {
+            File dir = new File(externalFilesDir(), subdir);
+            if (!dir.exists()) dir.mkdirs();
+            File out = new File(dir, "frame_" + System.currentTimeMillis() + ".jpg");
+            ByteArrayOutputStream bo = new ByteArrayOutputStream();
+            dst.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, bo);
+            FileOutputStream fo = new FileOutputStream(out);
+            fo.write(bo.toByteArray());
+            fo.close();
+            Log.i(TAG, "captured " + out.getName() + " " + w + "x" + h);
+            return out;
+        } catch (Exception e) {
+            Log.w(TAG, "save failed: " + e);
+            return null;
+        }
+    }
+
+    private boolean pixelCopy(final Bitmap dst) {
+        final CountDownLatch latch = new CountDownLatch(1);
+        final AtomicBoolean ok = new AtomicBoolean(false);
+        try {
+            PixelCopy.request(streamView, dst, new PixelCopy.OnPixelCopyFinishedListener() {
+                @Override public void onPixelCopyFinished(int result) {
+                    ok.set(result == PixelCopy.SUCCESS);
+                    latch.countDown();
+                }
+            }, captureHandler);
+        } catch (Exception e) {
+            Log.w(TAG, "pixelCopy request failed: " + e);
+            return false;
         }
         try {
-            captureOnce();
-        } catch (Throwable t) {
-            Log.w(TAG, "captureOnce failed", t);
+            if (!latch.await(COPY_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                Log.w(TAG, "pixelCopy timeout");
+                return false;
+            }
+        } catch (InterruptedException ie) {
+            return false;
         }
-        if (running.get()) {
-            handler.postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    captureLoop();
+        return ok.get();
+    }
+
+    // ---------- фон: авто-POST кадра в облако ----------
+
+    private void postBackground(final File frame) {
+        netHandler.post(new Runnable() {
+            @Override public void run() {
+                try {
+                    String b64 = fileToBase64(frame);
+                    if (b64 == null) return;
+                    String url = CLOUD_ENDPOINT + "?token=" + CLOUD_TOKEN;
+                    String body = "{\"image\":\"" + b64 + "\"}";
+                    String[] r = httpCall("POST", url, body, (int) NETWORK_TIMEOUT_MS);
+                    Log.i(TAG, "DIAG: background POST status: " + r[0] + " body: "
+                            + r[1].substring(0, Math.min(200, r[1].length())));
+                } catch (Exception e) {
+                    Log.w(TAG, "background POST failed: " + e);
                 }
-            }, intervalS * 1000L);
-        }
+            }
+        });
     }
 
-    private boolean captureOnce() {
-        int w = surfaceView.getWidth();
-        int h = surfaceView.getHeight();
-        if (w <= 0 || h <= 0) {
-            Log.w(TAG, "surface not ready yet");
-            return false;
-        }
-        Bitmap full = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-        if (!pixelCopy(surfaceView, full)) {
-            full.recycle();
-            return false;
-        }
-        int sw;
-        int sh;
-        if (w >= h) {
-            sw = CAPTURE_SIZE;
-            sh = Math.max(1, (int) ((long) h * CAPTURE_SIZE / w));
-        } else {
-            sh = CAPTURE_SIZE;
-            sw = Math.max(1, (int) ((long) w * CAPTURE_SIZE / h));
-        }
-        Bitmap small = Bitmap.createScaledBitmap(full, sw, sh, true);
-        File dir = captureDir();
-        boolean ok = false;
-        if (dir != null) {
-            File out = new File(dir, "frame_" + System.currentTimeMillis() + ".jpg");
-            try (FileOutputStream fos = new FileOutputStream(out)) {
-                ok = small.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, fos);
-            } catch (Throwable t) {
-                Log.w(TAG, "write capture failed", t);
-            }
-            if (ok) {
-                Log.i(TAG, "captured " + out.getName() + " " + sw + "x" + sh);
-                rotate(dir);
-            }
-        }
-        if (small != full) {
-            small.recycle();
-        }
-        full.recycle();
-        return ok;
+    // ---------- опросник: есть вопрос? ----------
+
+    private void schedulePoll() {
+        if (netHandler == null) return;
+        netHandler.removeCallbacks(pollRunnable);
+        netHandler.postDelayed(pollRunnable, POLL_INTERVAL_MS);
     }
 
-    private void rotate(File dir) {
-        File[] files = dir.listFiles();
-        if (files == null || files.length <= MAX_FILES) {
-            return;
+    private final Runnable pollRunnable = new Runnable() {
+        @Override public void run() {
+            try {
+                String url = CLOUD_ENDPOINT + "?token=" + CLOUD_TOKEN + "&poll=1";
+                String[] r = httpCall("GET", url, null, (int) NETWORK_TIMEOUT_MS);
+                if ("200".equals(r[0])) {
+                    JSONObject j = new JSONObject(r[1]);
+                    if ("query".equals(j.optString("status"))) {
+                        int qid = j.optInt("qid", 0);
+                        String q = j.optString("q", "");
+                        if (qid > 0 && qid != lastSentQid) {
+                            lastSentQid = qid;
+                            Log.i(TAG, "DIAG: query received qid=" + qid + ", sending burst");
+                            sendBurst(qid, q);
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "poll failed: " + e);
+            }
+            schedulePoll();
         }
-        Arrays.sort(files, Comparator.comparingLong(File::lastModified));
-        for (int i = 0; i < files.length - MAX_FILES; i++) {
-            files[i].delete();
-        }
+    };
+
+    private void sendBurst(final int qid, final String q) {
+        netHandler.post(new Runnable() {
+            @Override public void run() {
+                try {
+                    File dir = burstDir();
+                    File[] files = dir.listFiles();
+                    if (files == null || files.length < 2) {
+                        Log.w(TAG, "burst: only " + (files == null ? 0 : files.length)
+                                + " frames, skip");
+                        return;
+                    }
+                    Arrays.sort(files, new Comparator<File>() {
+                        @Override public int compare(File a, File b) {
+                            return Long.compare(a.lastModified(), b.lastModified());
+                        }
+                    });
+                    JSONArray arr = new JSONArray();
+                    int n = Math.min(files.length, BURST_MAX);
+                    for (int i = files.length - n; i < files.length; i++) {
+                        String b64 = fileToBase64(files[i]);
+                        if (b64 != null) arr.put(b64);
+                    }
+                    JSONObject req = new JSONObject();
+                    req.put("qid", qid);
+                    req.put("images", arr);
+                    String url = CLOUD_ENDPOINT + "?token=" + CLOUD_TOKEN;
+                    String[] r = httpCall("POST", url, req.toString(), 25000);
+                    Log.i(TAG, "DIAG: burst POST status: " + r[0] + " qid=" + qid
+                            + " images=" + arr.length());
+                    if ("200".equals(r[0])) {
+                        Log.i(TAG, "DIAG: burst answer: " + r[1].substring(0,
+                                Math.min(300, r[1].length())));
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "burst send failed: " + e);
+                }
+            }
+        });
+    }
+
+    // ---------- утилиты ----------
+
+    private File externalFilesDir() {
+        if (context == null) return null;
+        return context.getExternalFilesDir(null);
     }
 
     private File captureDir() {
-        File base = activity.getExternalFilesDir(null);
-        if (base == null) {
-            return null;
-        }
-        File dir = new File(base, CAPTURE_SUBDIR);
-        if (!dir.exists()) {
-            dir.mkdirs();
-        }
-        return dir;
+        return new File(externalFilesDir(), CAPTURE_SUBDIR);
     }
 
-    private boolean pixelCopy(SurfaceView view, Bitmap target) {
-        final CountDownLatch latch = new CountDownLatch(1);
-        final int[] result = {-1};
-        final Handler mainHandler = new Handler(Looper.getMainLooper());
-        PixelCopy.request(view, target,
-                new PixelCopy.OnPixelCopyFinishedListener() {
-                    @Override
-                    public void onPixelCopyFinished(int copyResult) {
-                        result[0] = copyResult;
-                        latch.countDown();
-                    }
-                }, mainHandler);
-        try {
-            if (!latch.await(COPY_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-                Log.w(TAG, "PixelCopy timed out");
-                return false;
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return false;
-        }
-        if (result[0] != PixelCopy.SUCCESS) {
-            Log.w(TAG, "PixelCopy failed, code=" + result[0]);
-            return false;
-        }
-        return true;
+    private File burstDir() {
+        return new File(externalFilesDir(), BURST_SUBDIR);
     }
+
+    private void rotate(File dir, int maxFiles) {
+        try {
+            File[] files = dir.listFiles();
+            if (files == null || files.length <= maxFiles) return;
+            Arrays.sort(files, new Comparator<File>() {
+                @Override public int compare(File a, File b) {
+                    return Long.compare(b.lastModified(), a.lastModified());
+                }
+            });
+            for (int i = maxFiles; i < files.length; i++) files[i].delete();
+        } catch (Exception e) {
+            Log.w(TAG, "rotate failed: " + e);
+        }
+    }
+
+    private String fileToBase64(File f) {
+        try {
+            FileInputStream in = new FileInputStream(f);
+            ByteArrayOutputStream bo = new ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+            in.close();
+            return Base64.encodeToString(bo.toByteArray(), Base64.NO_WRAP);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private String readText(File f) {
+        try {
+            FileInputStream in = new FileInputStream(f);
+            ByteArrayOutputStream bo = new ByteArrayOutputStream();
+            byte[] buf = new byte[1024];
+            int n;
+            while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+            in.close();
+            return new String(bo.toByteArray(), StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private static String[] httpCall(String method, String urlStr, String body, int timeoutMs) {
+        HttpURLConnection c = null;
+        try {
+            URL u = new URL(urlStr);
+            c = (HttpURLConnection) u.openConnection();
+            c.setRequestMethod(method);
+            c.setConnectTimeout(timeoutMs);
+            c.setReadTimeout(timeoutMs);
+            if (body != null) {
+                c.setDoOutput(true);
+                c.setRequestProperty("Content-Type", "application/json");
+                OutputStream os = c.getOutputStream();
+                os.write(body.getBytes(StandardCharsets.UTF_8));
+                os.close();
+            }
+            int code = c.getResponseCode();
+            InputStream is = code >= 400 ? c.getErrorStream() : c.getInputStream();
+            ByteArrayOutputStream bo = new ByteArrayOutputStream();
+            if (is != null) {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = is.read(buf)) > 0) bo.write(buf, 0, n);
+                is.close();
+            }
+            return new String[]{ String.valueOf(code), bo.toString("UTF-8") };
+        } catch (Exception e) {
+            return new String[]{ "0", "EXC: " + e.getClass().getSimpleName()
+                    + ": " + e.getMessage() };
+        } finally {
+            if (c != null) try { c.disconnect(); } catch (Exception ignored) {}
+        }
+    }
+
+    private int dedupPct = 0;
 }
