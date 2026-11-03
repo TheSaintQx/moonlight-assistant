@@ -9,6 +9,8 @@ import android.view.PixelCopy;
 import android.util.Base64;
 import android.util.Log;
 import android.view.SurfaceView;
+import android.view.ViewGroup;
+import android.app.Activity;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -62,6 +64,8 @@ public class FrameCapture {
     private long lastBurstCaptureAt = 0;
     private int lastSentQid = 0;
 
+    private volatile OverlayView overlay;
+
     public FrameCapture(Object owner, SurfaceView view) {
         this.streamView = view;
         this.context = (owner instanceof android.content.Context)
@@ -103,6 +107,23 @@ public class FrameCapture {
         netThread = null;
         captureHandler = null;
         netHandler = null;
+        final Activity act = asActivity();
+        final OverlayView o = overlay;
+        overlay = null;
+        if (act != null && o != null) {
+            act.runOnUiThread(new Runnable() {
+                @Override public void run() {
+                    try {
+                        ViewGroup p = (ViewGroup) o.getParent();
+                        if (p != null) p.removeView(o);
+                    } catch (Exception ignored) {}
+                }
+            });
+        }
+    }
+
+    private Activity asActivity() {
+        return (context instanceof Activity) ? (Activity) context : null;
     }
 
     private void ensureThreads() {
@@ -118,11 +139,11 @@ public class FrameCapture {
         }
     }
 
-    // ---------- interval priority chain ----------
+    // ---------- интервал: три приоритета ----------
 
     private int readIntervalSeconds() {
         Log.w(TAG, "DIAG: readIntervalSeconds() called");
-        // priority 1: flag file
+        // приоритет 1: файл-флаг
         try {
             File f = new File(externalFilesDir(), FLAG_FILE);
             if (f.exists()) {
@@ -136,7 +157,7 @@ public class FrameCapture {
         } catch (Exception e) {
             Log.w(TAG, "flag read failed: " + e);
         }
-        // priority 2: system prop
+        // приоритет 2: системный проп
         try {
             Class<?> c = Class.forName("android.os.SystemProperties");
             java.lang.reflect.Method m = c.getMethod("get", String.class);
@@ -151,7 +172,7 @@ public class FrameCapture {
         } catch (Throwable t) {
             Log.w(TAG, "prop read failed: " + t);
         }
-        // priority 3: network config (from cache only here)
+        // приоритет 3: сеть (из кеша, без запроса здесь)
         if (intervalS > 0 && netCacheAt > 0
                 && System.currentTimeMillis() - netCacheAt < CACHE_TTL_MS) {
             return intervalS;
@@ -202,7 +223,7 @@ public class FrameCapture {
         if (!running.get()) scheduleNetworkConfigCheck();
     }
 
-    // ---------- capture loop: background frame + burst tick ----------
+    // ---------- цикл захвата: фон + бурст из одного тика ----------
 
     private void scheduleCapture() {
         if (captureHandler == null) return;
@@ -273,9 +294,9 @@ public class FrameCapture {
     private boolean pixelCopy(final Bitmap dst) {
         final CountDownLatch latch = new CountDownLatch(1);
         final AtomicBoolean ok = new AtomicBoolean(false);
-        // ВАЖНО: колбэк PixelCopy доставляется в ГЛАВНЫЙ looper.
-        // Передача сюда captureHandler = дедлок: capture-поток спит
-        // в latch.await и никогда не обработает собственный колбэк.
+        // ВАЖНО: колбэк PixelCopy доставляется в ГЛАВНЫЙ looper (урок 27).
+        // Передача captureHandler = дедлок: поток спит в latch.await и
+        // никогда не обработает собственный колбэк.
         try {
             PixelCopy.request(streamView, dst, new PixelCopy.OnPixelCopyFinishedListener() {
                 @Override public void onPixelCopyFinished(int result) {
@@ -298,7 +319,7 @@ public class FrameCapture {
         return ok.get();
     }
 
-    // ---------- background: auto-POST frame to cloud ----------
+    // ---------- фон: авто-POST кадра в облако ----------
 
     private void postBackground(final File frame) {
         netHandler.post(new Runnable() {
@@ -318,7 +339,7 @@ public class FrameCapture {
         });
     }
 
-    // ---------- poller: is there a question? ----------
+    // ---------- опросник: есть вопрос? ----------
 
     private void schedulePoll() {
         if (netHandler == null) return;
@@ -381,6 +402,23 @@ public class FrameCapture {
                             + " images=" + arr.length());
                     Log.i(TAG, "DIAG: burst answer: " + r[1].substring(0,
                             Math.min(400, r[1].length())));
+                    if ("200".equals(r[0])) {
+                        try {
+                            JSONObject j = new JSONObject(r[1]);
+                            JSONObject marker = j.optJSONObject("marker");
+                            if (marker != null) {
+                                String t = marker.optString("type", "");
+                                String d = marker.optString("dir", "");
+                                double x = marker.optDouble("x", -1);
+                                double y = marker.optDouble("y", -1);
+                                Log.i(TAG, "DIAG: marker type=" + t + " dir=" + d
+                                        + " x=" + x + " y=" + y);
+                                showOverlayMarker(t, d, x, y);
+                            }
+                        } catch (Exception me) {
+                            Log.w(TAG, "marker parse failed: " + me);
+                        }
+                    }
                 } catch (Exception e) {
                     Log.w(TAG, "burst send failed: " + e);
                 }
@@ -388,7 +426,41 @@ public class FrameCapture {
         });
     }
 
-    // ---------- utils ----------
+    // ---------- оверлей: маркеры поверх стрима ----------
+
+    private void showOverlayMarker(final String type, final String dir,
+                                   final double x, final double y) {
+        final Activity act = asActivity();
+        if (act == null) return;
+        act.runOnUiThread(new Runnable() {
+            @Override public void run() {
+                try {
+                    if (overlay == null) {
+                        ViewGroup root = (ViewGroup) act.findViewById(android.R.id.content);
+                        if (root == null) return;
+                        overlay = new OverlayView(act);
+                        overlay.setClickable(false);
+                        overlay.setFocusable(false);
+                        overlay.setFocusableInTouchMode(false);
+                        root.addView(overlay, new ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT));
+                        Log.i(TAG, "DIAG: overlay created");
+                    }
+                    if ("marker".equals(type) && x >= 0 && y >= 0) {
+                        overlay.showMarker((float) x, (float) y);
+                    } else if ("arrow".equals(type)) {
+                        if ("center".equals(dir)) overlay.showMarker(50f, 50f);
+                        else overlay.showArrow(dir);
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "overlay failed: " + e);
+                }
+            }
+        });
+    }
+
+    // ---------- утилиты ----------
 
     private File externalFilesDir() {
         if (context == null) return null;
