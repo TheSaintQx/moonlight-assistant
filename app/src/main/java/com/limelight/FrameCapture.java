@@ -39,9 +39,11 @@ public class FrameCapture {
     private static final String CLOUD_TOKEN = "moon-7f3k9p2xq8v4m1w6r5t0zc4";
     private static final long CACHE_TTL_MS = 600_000L;
 
-    private static final int CAPTURE_SIZE = 256;
+    // v3.3: разрешение 512px (было 256) — модель различает объекты и текст.
+    // JPEG 80 вместо 85, чтобы бурст из 15 кадров влезал в лимит функции ~1 МБ.
+    private static final int CAPTURE_SIZE = 512;
     private static final int MAX_FILES = 20;
-    private static final int JPEG_QUALITY = 85;
+    private static final int JPEG_QUALITY = 80;
     private static final long COPY_TIMEOUT_MS = 2000;
     private static final long NETWORK_TIMEOUT_MS = 5000;
     private static final String CAPTURE_SUBDIR = "capture";
@@ -265,7 +267,7 @@ public class FrameCapture {
         }
         if (streamView == null) return null;
         int w = CAPTURE_SIZE;
-        int h = 144;
+        int h = 288;
         try {
             int sw = streamView.getWidth();
             int sh = streamView.getHeight();
