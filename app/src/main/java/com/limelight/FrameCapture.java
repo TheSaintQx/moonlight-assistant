@@ -1,12 +1,12 @@
 package com.limelight;
 
 import android.graphics.Bitmap;
-import android.graphics.PixelCopy;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.util.Base64;
 import android.util.Log;
+import android.view.PixelCopy;
 import android.view.SurfaceView;
 
 import org.json.JSONArray;
