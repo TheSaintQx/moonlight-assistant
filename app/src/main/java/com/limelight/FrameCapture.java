@@ -39,11 +39,9 @@ public class FrameCapture {
     private static final String CLOUD_TOKEN = "moon-7f3k9p2xq8v4m1w6r5t0zc4";
     private static final long CACHE_TTL_MS = 600_000L;
 
-    // v3.3: разрешение 512px (было 256) — модель различает объекты и текст.
-    // JPEG 80 вместо 85, чтобы бурст из 15 кадров влезал в лимит функции ~1 МБ.
     private static final int CAPTURE_SIZE = 512;
     private static final int MAX_FILES = 20;
-    private static final int JPEG_QUALITY = 80;
+    private static final int JPEG_QUALITY = 85;
     private static final long COPY_TIMEOUT_MS = 2000;
     private static final long NETWORK_TIMEOUT_MS = 5000;
     private static final String CAPTURE_SUBDIR = "capture";
@@ -65,8 +63,11 @@ public class FrameCapture {
     private long lastBgCaptureAt = 0;
     private long lastBurstCaptureAt = 0;
     private int lastSentQid = 0;
+    private long lastNonQueryAt = 0;
+    private long lastPollDiagAt = 0;
 
     private volatile OverlayView overlay;
+    private volatile Runnable hideOverlayRunnable;
 
     public FrameCapture(Object owner, SurfaceView view) {
         this.streamView = view;
@@ -267,7 +268,7 @@ public class FrameCapture {
         }
         if (streamView == null) return null;
         int w = CAPTURE_SIZE;
-        int h = 288;
+        int h = 144;
         try {
             int sw = streamView.getWidth();
             int sh = streamView.getHeight();
@@ -297,6 +298,8 @@ public class FrameCapture {
         final CountDownLatch latch = new CountDownLatch(1);
         final AtomicBoolean ok = new AtomicBoolean(false);
         // ВАЖНО: колбэк PixelCopy доставляется в ГЛАВНЫЙ looper (урок 27).
+        // Передача captureHandler = дедлок: поток спит в latch.await и
+        // никогда не обработает собственный колбэк.
         try {
             PixelCopy.request(streamView, dst, new PixelCopy.OnPixelCopyFinishedListener() {
                 @Override public void onPixelCopyFinished(int result) {
@@ -350,11 +353,26 @@ public class FrameCapture {
     private final Runnable pollRunnable = new Runnable() {
         @Override public void run() {
             try {
+                // БЕЗ кеша: каждый тик реальный GET (HTTP-хелпер чистый, без CACHE_TTL)
                 String url = CLOUD_ENDPOINT + "?token=" + CLOUD_TOKEN + "&poll=1";
                 String[] r = httpCall("GET", url, null, (int) NETWORK_TIMEOUT_MS);
                 if ("200".equals(r[0])) {
                     JSONObject j = new JSONObject(r[1]);
-                    if ("query".equals(j.optString("status"))) {
+                    String status = j.optString("status");
+
+                    // ПЕРВИЧНЫЙ КАНАЛ: marker из poll-ответа -> сразу оверлей
+                    JSONObject marker = j.optJSONObject("marker");
+                    boolean hasMarker = (marker != null);
+                    if (hasMarker) {
+                        Log.i(TAG, "DIAG: marker received " + marker.toString());
+                        handleMarkerFromPoll(marker);
+                    } else {
+                        hideOverlay();
+                    }
+
+                    // РЕЗЕРВНЫЙ КАНАЛ: burst по status:"query" (guard не трогать)
+                    if ("query".equals(status)) {
+                        lastNonQueryAt = 0;
                         int qid = j.optInt("qid", 0);
                         String q = j.optString("q", "");
                         if (qid > 0 && qid != lastSentQid) {
@@ -362,6 +380,25 @@ public class FrameCapture {
                             Log.i(TAG, "DIAG: query received qid=" + qid + ", sending burst");
                             sendBurst(qid, q);
                         }
+                    } else {
+                        // сброс lastSentQid через 60 с без query (повторный показ)
+                        long now = System.currentTimeMillis();
+                        if (lastSentQid != 0 && lastNonQueryAt == 0) {
+                            lastNonQueryAt = now;   // старт отсчёта без-query
+                        }
+                        if (lastSentQid != 0 && lastNonQueryAt != 0
+                                && now - lastNonQueryAt > 60_000L) {
+                            lastSentQid = 0;
+                            lastNonQueryAt = 0;
+                        }
+                    }
+
+                    // Диагностический лог не чаще 1 раза в 10 с
+                    long nowMs = System.currentTimeMillis();
+                    if (nowMs - lastPollDiagAt >= 10_000L) {
+                        lastPollDiagAt = nowMs;
+                        Log.i(TAG, "DIAG: poll status=" + status
+                                + " marker=" + (hasMarker ? "yes" : "no"));
                     }
                 }
             } catch (Exception e) {
@@ -407,8 +444,8 @@ public class FrameCapture {
                             JSONObject j = new JSONObject(r[1]);
                             JSONObject marker = j.optJSONObject("marker");
                             if (marker != null) {
-                                Log.i(TAG, "DIAG: marker " + marker.toString());
-                                showOverlayMarker(marker);
+                                Log.i(TAG, "DIAG: marker received " + marker.toString());
+                                handleMarkerFromPoll(marker);
                             }
                         } catch (Exception me) {
                             Log.w(TAG, "marker parse failed: " + me);
@@ -423,28 +460,52 @@ public class FrameCapture {
 
     // ---------- оверлей: маркеры поверх стрима ----------
 
-    private void showOverlayMarker(final JSONObject marker) {
+    private void handleMarkerFromPoll(final JSONObject marker) {
         final Activity act = asActivity();
         if (act == null) return;
+        final String t = marker.optString("type", "");
+        final String d = marker.optString("dir", "");
+        final double x = marker.optDouble("x", -1);
+        final double y = marker.optDouble("y", -1);
+        final double x1 = marker.optDouble("x1", -1);
+        final double y1 = marker.optDouble("y1", -1);
+        final double x2 = marker.optDouble("x2", -1);
+        final double y2 = marker.optDouble("y2", -1);
+
         act.runOnUiThread(new Runnable() {
             @Override public void run() {
                 try {
-                    OverlayView ov = ensureOverlay(act);
-                    String t = marker.optString("type", "");
-                    if ("highlight".equals(t)) {
-                        float x1 = (float) marker.optDouble("x1", 20);
-                        float y1 = (float) marker.optDouble("y1", 20);
-                        float x2 = (float) marker.optDouble("x2", 80);
-                        float y2 = (float) marker.optDouble("y2", 80);
-                        ov.showHighlight(x1, y1, x2, y2);
+                    ensureOverlay();
+                    if (overlay == null) return;
+
+                    if (hideOverlayRunnable != null) {
+                        overlay.removeCallbacks(hideOverlayRunnable);
+                    }
+                    hideOverlayRunnable = new Runnable() {
+                        @Override public void run() { hideOverlay(); }
+                    };
+                    overlay.postDelayed(hideOverlayRunnable, 10_000L);
+
+                    if ("marker".equals(t)) {
+                        if (x1 >= 0 && y1 >= 0 && x2 >= 0 && y2 >= 0
+                                && x2 > x1 && y2 > y1) {
+                            overlay.showHighlight((float) x1, (float) y1,
+                                    (float) x2, (float) y2);
+                            Log.i(TAG, "DIAG: overlay drawn highlight rect="
+                                    + (int) x1 + "," + (int) y1 + ","
+                                    + (int) x2 + "," + (int) y2);
+                        } else if (x >= 0 && y >= 0) {
+                            overlay.showMarker((float) x, (float) y);
+                            Log.i(TAG, "DIAG: overlay drawn point x=" + x + " y=" + y);
+                        }
                     } else if ("arrow".equals(t)) {
-                        String d = marker.optString("dir", "center");
-                        if ("center".equals(d)) ov.showMarker(50f, 50f);
-                        else ov.showArrow(d);
-                    } else if ("marker".equals(t)) {
-                        double x = marker.optDouble("x", -1);
-                        double y = marker.optDouble("y", -1);
-                        if (x >= 0 && y >= 0) ov.showMarker((float) x, (float) y);
+                        if ("center".equals(d)) {
+                            overlay.showMarker(50f, 50f);
+                            Log.i(TAG, "DIAG: overlay drawn arrow-center");
+                        } else {
+                            overlay.showArrow(d);
+                            Log.i(TAG, "DIAG: overlay drawn arrow-" + d);
+                        }
                     }
                 } catch (Exception e) {
                     Log.w(TAG, "overlay failed: " + e);
@@ -453,20 +514,34 @@ public class FrameCapture {
         });
     }
 
-    private OverlayView ensureOverlay(Activity act) {
-        if (overlay != null) return overlay;
-        ViewGroup root = (ViewGroup) act.findViewById(android.R.id.content);
-        if (root == null) return null;
-        OverlayView ov = new OverlayView(act);
-        ov.setClickable(false);
-        ov.setFocusable(false);
-        ov.setFocusableInTouchMode(false);
-        root.addView(ov, new ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT));
-        overlay = ov;
-        Log.i(TAG, "DIAG: overlay created");
-        return ov;
+    private void ensureOverlay() {
+        final Activity act = asActivity();
+        if (act == null) return;
+        if (overlay == null) {
+            ViewGroup root = (ViewGroup) act.findViewById(android.R.id.content);
+            if (root == null) return;
+            overlay = new OverlayView(act);
+            overlay.setClickable(false);
+            overlay.setFocusable(false);
+            overlay.setFocusableInTouchMode(false);
+            root.addView(overlay, new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT));
+            Log.i(TAG, "DIAG: overlay created");
+        }
+    }
+
+    private void hideOverlay() {
+        final OverlayView ov = overlay;
+        final Activity act = asActivity();
+        if (ov == null || act == null) return;
+        act.runOnUiThread(new Runnable() {
+            @Override public void run() {
+                if (!ov.hasMarker()) return;
+                ov.clearMarker();
+                Log.i(TAG, "DIAG: overlay hidden");
+            }
+        });
     }
 
     // ---------- утилиты ----------
@@ -560,4 +635,3 @@ public class FrameCapture {
         }
     }
 }
-

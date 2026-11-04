@@ -5,16 +5,12 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Path;
-import android.graphics.PorterDuff;
-import android.graphics.PorterDuffXfermode;
 import android.graphics.RectF;
 import android.view.View;
 
 /**
- * Оверлей «Лунного Ассистента Игр», v2.
- * Основной режим — ПОДСВЕТКА (TYPE_HIGHLIGHT): экран притемняется тёмно-
- * фиолетовым, а объект остаётся ярким внутри неоновой рамки со свечением.
- * Стрелка и точка сохранены как запасные режимы.
+ * Оверлей-маркеры для «Лунного Ассистента Игр».
+ * Рисует стрелку, пульсирующее кольцо или хайлайт-рамку поверх SurfaceView.
  * Не фокусируемый, не кликабельный: тач проходит в игру насквозь.
  * Гарантия: любые ошибки рисования не могут обрушить стрим (try/catch снаружи).
  */
@@ -23,21 +19,19 @@ public class OverlayView extends View {
     public static final int TYPE_MARKER = 2;
     public static final int TYPE_HIGHLIGHT = 3;
 
-    private static final long LIVE_MS = 6000;       // стрелка/точка
-    private static final long LIVE_HL_MS = 9000;    // подсветка живёт дольше
-    private static final long FADE_MS = 800;
+    private static final long LIVE_MS = 10000;  // сколько висит маркер (по ТЗ 40)
+    private static final long FADE_MS = 800;    // плавное затухание
+    private static final float DIM_ALPHA = 0.55f; // затемнение фона при хайлайте
 
     private int type = 0;
     private String dir = "center";
     private float xPct = 50f, yPct = 50f;
-    private float x1 = 20f, y1 = 20f, x2 = 80f, y2 = 80f;
+    private float x1Pct = 0f, y1Pct = 0f, x2Pct = 0f, y2Pct = 0f;
     private long shownAt = 0;
 
     private final Paint stroke;
     private final Paint fill;
     private final Paint dim;
-    private final Paint punch;
-    private final Paint glow;
     private final Path path = new Path();
     private final RectF rect = new RectF();
 
@@ -51,20 +45,9 @@ public class OverlayView extends View {
         fill = new Paint(Paint.ANTI_ALIAS_FLAG);
         fill.setColor(0xFFFFFFFF);
         fill.setStyle(Paint.Style.FILL);
-        // Тёмно-фиолетовое притемнение всего кадра (как на референсах)
         dim = new Paint(Paint.ANTI_ALIAS_FLAG);
-        dim.setColor(0xE60D0726);
-        // «Прожигатель»: вырезает окно в затемнении, кадр игры просвечивает
-        punch = new Paint(Paint.ANTI_ALIAS_FLAG);
-        punch.setStyle(Paint.Style.FILL);
-        punch.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.CLEAR));
-        // Неоновая рамка со свечением
-        glow = new Paint(Paint.ANTI_ALIAS_FLAG);
-        glow.setColor(0xFFC24BFF);
-        glow.setStyle(Paint.Style.STROKE);
-        glow.setStrokeWidth(dp(4));
-        glow.setShadowLayer(dp(14), 0, 0, 0xFFB44BFF);
-        glow.setStrokeCap(Paint.Cap.ROUND);
+        dim.setColor(Color.BLACK);
+        dim.setStyle(Paint.Style.FILL);
     }
 
     /** Стрелка у края экрана, остриём к краю: left/right/up/down. */
@@ -82,22 +65,33 @@ public class OverlayView extends View {
         show();
     }
 
-    /** Подсветка объекта: прямоугольник в процентах кадра (x1,y1)-(x2,y2). */
-    public void showHighlight(float a, float b, float c, float d) {
+    /**
+     * Хайлайт: затемнение + скруглённая рамка вокруг области.
+     * Координаты в процентах 0..100 (x1<x2, y1<y2).
+     */
+    public void showHighlight(float x1, float y1, float x2, float y2) {
         type = TYPE_HIGHLIGHT;
-        // нормализация: модель могла перепутать порядок углов
-        float lx = clamp(Math.min(a, c), 0f, 100f);
-        float rx = clamp(Math.max(a, c), 0f, 100f);
-        float ty = clamp(Math.min(b, d), 0f, 100f);
-        float by = clamp(Math.max(b, d), 0f, 100f);
-        x1 = lx; y1 = ty; x2 = rx; y2 = by;
+        x1Pct = clamp(Math.min(x1, x2), 0f, 100f);
+        y1Pct = clamp(Math.min(y1, y2), 0f, 100f);
+        x2Pct = clamp(Math.max(x1, x2), 0f, 100f);
+        y2Pct = clamp(Math.max(y1, y2), 0f, 100f);
         show();
     }
 
-    /** Убрать маркер немедленно. */
-    public void clear() {
+    /** Убрать маркер немедленно (алиас для FrameCapture.hideOverlay). */
+    public void clearMarker() {
         type = 0;
         invalidate();
+    }
+
+    /** Есть ли активный маркер (без спама при пустом poll). */
+    public boolean hasMarker() {
+        return type != 0;
+    }
+
+    /** Убрать маркер немедленно (старое имя). */
+    public void clear() {
+        clearMarker();
     }
 
     private void show() {
@@ -116,14 +110,13 @@ public class OverlayView extends View {
     @Override
     protected void onDraw(Canvas canvas) {
         if (type == 0 || shownAt == 0) return;
-        long live = (type == TYPE_HIGHLIGHT) ? LIVE_HL_MS : LIVE_MS;
         long age = System.currentTimeMillis() - shownAt;
-        if (age >= live) {
+        if (age >= LIVE_MS) {
             type = 0;
             return;
         }
         float alpha = 1f;
-        long fadeStart = live - FADE_MS;
+        long fadeStart = LIVE_MS - FADE_MS;
         if (age > fadeStart) {
             alpha = 1f - (age - fadeStart) / (float) FADE_MS;
         }
@@ -134,27 +127,29 @@ public class OverlayView extends View {
         float r = Math.min(w, h) * 0.055f;
 
         if (type == TYPE_HIGHLIGHT) {
-            float l = x1 / 100f * w;
-            float t = y1 / 100f * h;
-            float ri = x2 / 100f * w;
-            float bo = y2 / 100f * h;
-            rect.set(l - dp(8), t - dp(8), ri + dp(8), bo + dp(8));
-            float radius = dp(22);
-            // слой, внутри которого «прожигаем» окно вокруг объекта
-            canvas.saveLayer(0, 0, w, h, null);
-            dim.setAlpha((int) (230 * alpha));
-            canvas.drawRect(0, 0, w, h, dim);
-            path.reset();
-            path.addRoundRect(rect, radius, radius, Path.Direction.CW);
-            canvas.drawPath(path, punch);
-            canvas.restore();
-            glow.setAlpha(a);
-            canvas.drawRoundRect(rect, radius, radius, glow);
-            postInvalidateDelayed(50);
-            return;
-        }
+            float rx1 = x1Pct / 100f * w;
+            float ry1 = y1Pct / 100f * h;
+            float rx2 = x2Pct / 100f * w;
+            float ry2 = y2Pct / 100f * h;
+            rect.set(rx1, ry1, rx2, ry2);
+            float radius = dp(12);
 
-        if (type == TYPE_MARKER) {
+            // затемнение всего фона (сквозь вырезается область)
+            dim.setAlpha((int) (DIM_ALPHA * 255 * alpha));
+            path.reset();
+            path.addRect(0, 0, w, h, Path.Direction.CW);
+            path.addRect(rect.left, rect.top, rect.right, rect.bottom, Path.Direction.CCW);
+            canvas.drawPath(path, dim);
+
+            // скруглённая рамка
+            float rr = Math.min(radius, Math.min(rect.width(), rect.height()) / 2f);
+            rect.set(rect.left - dp(4), rect.top - dp(4),
+                    rect.right + dp(4), rect.bottom + dp(4));
+            stroke.setAlpha(a);
+            stroke.setStrokeWidth(dp(4));
+            canvas.drawRoundRect(rect, rr, rr, stroke);
+            stroke.setStrokeWidth(dp(5));
+        } else if (type == TYPE_MARKER) {
             float mx = xPct / 100f * w;
             float my = yPct / 100f * h;
             float pulse = 1f + 0.15f * (float) Math.sin(age / 180.0);
@@ -182,9 +177,9 @@ public class OverlayView extends View {
             path.reset();
             path.moveTo(tipX, tipY);
             path.lineTo(tipX - (float) (half * Math.cos(ang - 0.55)),
-                        tipY - (float) (half * Math.sin(ang - 0.55)));
+                    tipY - (float) (half * Math.sin(ang - 0.55)));
             path.lineTo(tipX - (float) (half * Math.cos(ang + 0.55)),
-                        tipY - (float) (half * Math.sin(ang + 0.55)));
+                    tipY - (float) (half * Math.sin(ang + 0.55)));
             path.close();
             fill.setAlpha((int) (120 * alpha));
             stroke.setAlpha(a);
@@ -192,6 +187,7 @@ public class OverlayView extends View {
             canvas.drawPath(path, fill);
             canvas.drawPath(path, stroke);
         }
+        // тик анимации (пульс + затухание)
         postInvalidateDelayed(50);
     }
 }
