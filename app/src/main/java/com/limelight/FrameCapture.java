@@ -560,3 +560,4 @@ public class FrameCapture {
         }
     }
 }
+
