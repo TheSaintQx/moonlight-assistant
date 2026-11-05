@@ -1,3 +1,12 @@
+package com.limelight;
+
+import android.content.Context;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.RectF;
+import android.view.View;
+
 public class OverlayView extends View {
     public static final int TYPE_ARROW = 1;
     public static final int TYPE_MARKER = 2;
