@@ -1,6 +1,7 @@
 package com.limelight;
 
 import android.content.Context;
+import android.graphics.Color;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Path;
@@ -104,7 +105,7 @@ public class OverlayView extends View {
         invalidate();
     }
 
-    private void clearMarker() {
+    public void clearMarker() {
         type = 0;
         invalidate();
     }
@@ -152,9 +153,9 @@ public class OverlayView extends View {
             canvas.drawPath(path, dim);
             stroke.setAlpha(a);
             stroke.setStrokeWidth(dp(4));
-            canvas.drawRoundRect(rx1 - dp(4), ry1 - dp(4), rx2 + dp(4), ry2 + dp(4), rr, rr);
+            canvas.drawRoundRect(rx1 - dp(4), ry1 - dp(4), rx2 + dp(4), ry2 + dp(4), rr, rr, stroke);
             stroke.setStrokeWidth(dp(5));
-            canvas.drawRoundRect(rx1 - dp(4), ry1 - dp(4), rx2 + dp(4), ry2 + dp(4), rr, rr);
+            canvas.drawRoundRect(rx1 - dp(4), ry1 - dp(4), rx2 + dp(4), ry2 + dp(4), rr, rr, stroke);
         } else if (type == TYPE_MARKER) {
             float mx = xPct / 100f * w;
             float my = yPct / 100f * h;
