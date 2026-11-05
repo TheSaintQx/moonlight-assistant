@@ -62,7 +62,7 @@ public class OverlayView extends View {
 
         text = new Paint(Paint.ANTI_ALIAS_FLAG);
         text.setColor(Color.WHITE);
-        text textSize(sp(15));
+        text.setTextSize(dp(15));
         text.setShadowLayer(dp(2), 0, 0, 0xFF000000);
 
         setWillNotDraw(false);
