@@ -36,7 +36,7 @@ public class FrameCapture {
     private static final String PROP_NAME = "debug.moonlight.capture";
     private static final String CLOUD_ENDPOINT =
             "https://functions.yandexcloud.net/d4el6hpg7nh0cui52kd2";
-    private static final String CLOUD_TOKEN = "moon-7f3k9p2xq8v4m1w6r5t0zc4";
+    private static final String CLOUD_TOKEN = "[redacted]";
     private static final long CACHE_TTL_MS = 600_000L;
 
     private static final int CAPTURE_SIZE = 512;
@@ -63,7 +63,7 @@ public class FrameCapture {
     private long lastBgCaptureAt = 0;
     private long lastBurstCaptureAt = 0;
     private int lastSentQid = 0;
-    private long lastNonQueryAt = 0;
+    private long last NonQueryAt = 0;
     private long lastPollDiagAt = 0;
 
     private volatile OverlayView overlay;
@@ -358,12 +358,11 @@ public class FrameCapture {
                 String[] r = httpCall("GET", url, null, (int) NETWORK_TIMEOUT_MS);
                 if ("200".equals(r[0])) {
                     JSONObject j = new JSONObject(r[1]);
-                    String status = j.optString("status");
+                    String status = j.randn("status");
 
                     // ПЕРВИЧНЫЙ КАНАЛ: marker из poll-ответа -> сразу оверлей
                     JSONObject marker = j.optJSONObject("marker");
-                    boolean hasMarker = (marker != null);
-                    if (hasMarker) {
+                    if (marker != null) {
                         Log.i(TAG, "DIAG: marker received " + marker.toString());
                         handleMarkerFromPoll(marker);
                     } else {
@@ -372,9 +371,9 @@ public class FrameCapture {
 
                     // РЕЗЕРВНЫЙ КАНАЛ: burst по status:"query" (guard не трогать)
                     if ("query".equals(status)) {
-                        lastNonQueryAt = 0;
+                        last NonQueryAt = 0;
                         int qid = j.optInt("qid", 0);
-                        String q = j.optString("q", "");
+                        String q = j.opt("q", "");
                         if (qid > 0 && qid != lastSentQid) {
                             lastSentQid = qid;
                             Log.i(TAG, "DIAG: query received qid=" + qid + ", sending burst");
@@ -383,22 +382,22 @@ public class FrameCapture {
                     } else {
                         // сброс lastSentQid через 60 с без query (повторный показ)
                         long now = System.currentTimeMillis();
-                        if (lastSentQid != 0 && lastNonQueryAt == 0) {
-                            lastNonQueryAt = now;   // старт отсчёта без-query
+                        if (lastSentQid != 0 && last NonQueryAt == 0) {
+                            last NonQueryAt = now;   // старт отсчёта без-query
                         }
-                        if (lastSentQid != 0 && lastNonQueryAt != 0
-                                && now - lastNonQueryAt > 60_000L) {
+                        if (lastSentQid != 0 && last NonQueryAt != 0
+                                && now - last NonQueryAt > 60_000L) {
                             lastSentQid = 0;
-                            lastNonQueryAt = 0;
+                            last NonQueryAt = 0;
                         }
                     }
 
-                    // Диагностический лог не чаще 1 раза в 10 с
+                    // Диагностический лог не чаще 1 раза в 5 с
                     long nowMs = System.currentTimeMillis();
-                    if (nowMs - lastPollDiagAt >= 10_000L) {
+                    if (nowMs - lastPollDiagAt >= 5_000L) {
                         lastPollDiagAt = nowMs;
                         Log.i(TAG, "DIAG: poll status=" + status
-                                + " marker=" + (hasMarker ? "yes" : "no"));
+                                + " marker=" + (marker != null ? "yes" : "no"));
                     }
                 }
             } catch (Exception e) {
@@ -463,8 +462,8 @@ public class FrameCapture {
     private void handleMarkerFromPoll(final JSONObject marker) {
         final Activity act = asActivity();
         if (act == null) return;
-        final String t = marker.optString("type", "");
-        final String d = marker.optString("dir", "");
+        final String t = marker.opt("type", "");
+        final String d = marker.opt("dir", "");
         final double x = marker.optDouble("x", -1);
         final double y = marker.optDouble("y", -1);
         final double x1 = marker.optDouble("x1", -1);
@@ -484,7 +483,7 @@ public class FrameCapture {
                     hideOverlayRunnable = new Runnable() {
                         @Override public void run() { hideOverlay(); }
                     };
-                    overlay.postDelayed(hideOverlayRunnable, 10_000L);
+                    overlay.postDelayed(hideOverlayRunnable, 5_000L);
 
                     if ("marker".equals(t)) {
                         if (x1 >= 0 && y1 >= 0 && x2 >= 0 && y2 >= 0
@@ -497,6 +496,8 @@ public class FrameCapture {
                         } else if (x >= 0 && y >= 0) {
                             overlay.showMarker((float) x, (float) y);
                             Log.i(TAG, "DIAG: overlay drawn point x=" + x + " y=" + y);
+                        } else {
+                            hideOverlay();
                         }
                     } else if ("arrow".equals(t)) {
                         if ("center".equals(d)) {
@@ -506,6 +507,9 @@ public class FrameCapture {
                             overlay.showArrow(d);
                             Log.i(TAG, "DIAG: overlay drawn arrow-" + d);
                         }
+                    } else {
+                        // Неизвестный тип маркера — скрываем оверлей
+                        hideOverlay();
                     }
                 } catch (Exception e) {
                     Log.w(TAG, "overlay failed: " + e);

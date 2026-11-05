@@ -1,25 +1,9 @@
-package com.limelight;
-
-import android.content.Context;
-import android.graphics.Canvas;
-import android.graphics.Color;
-import android.graphics.Paint;
-import android.graphics.Path;
-import android.graphics.RectF;
-import android.view.View;
-
-/**
- * Оверлей-маркеры для «Лунного Ассистента Игр».
- * Рисует стрелку, пульсирующее кольцо или хайлайт-рамку поверх SurfaceView.
- * Не фокусируемый, не кликабельный: тач проходит в игру насквозь.
- * Гарантия: любые ошибки рисования не могут обрушить стрим (try/catch снаружи).
- */
 public class OverlayView extends View {
     public static final int TYPE_ARROW = 1;
     public static final int TYPE_MARKER = 2;
     public static final int TYPE_HIGHLIGHT = 3;
 
-    private static final long LIVE_MS = 10000;  // сколько висит маркер (по ТЗ 40)
+    private static final long LIVE_MS = 5000;   // сколько висит маркер
     private static final long FADE_MS = 800;    // плавное затухание
     private static final float DIM_ALPHA = 0.55f; // затемнение фона при хайлайте
 
@@ -30,45 +14,60 @@ public class OverlayView extends View {
     private long shownAt = 0;
 
     private final Paint stroke;
+    private final Paint scan;
+    private final Paint band;
     private final Paint fill;
+    private final Paint glow;
     private final Paint dim;
+    private final Paint text;
     private final Path path = new Path();
     private final RectF rect = new RectF();
 
+    private float scanY = 0f;
+    private boolean scanDown = true;
+
     public OverlayView(Context c) {
         super(c);
+        setWillNotDraw(false);
+
         stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
-        stroke.setColor(Color.WHITE);
+        stroke.setColor(0xFF9D4EDD);  // неоновый пурпур
         stroke.setStyle(Paint.Style.STROKE);
-        stroke.setStrokeWidth(dp(5));
+        stroke.setStrokeWidth(dp(3));
         stroke.setShadowLayer(dp(4), 0, 0, 0xB3000000);
+
+        scan = new Paint(Paint.ANTI_ALIAS_FLAG);
+        scan.setColor(0xFF00CED1);  // неоновый синий
+        scan.setStrokeWidth(dp(1));
+        scan.setShadowLayer(dp(3), 0, 0, 0x6600CED1);
+
+        band = new Paint(Paint.ANTI_ALIAS_FLAG);
+        band.setColor(0xFFFF00FF);  // неоновый пурпур
+        band.setStrokeWidth(dp(4));
+        band.setShadowLayer(dp(6), 0, 0, 0x99FF00FF);
+
         fill = new Paint(Paint.ANTI_ALIAS_FLAG);
-        fill.setColor(0xFFFFFFFF);
+        fill.setColor(0xFFFF00FF);  // неоновый пурпур
         fill.setStyle(Paint.Style.FILL);
+        fill.setShadowLayer(dp(6), 0, 0, 0x9900CED1);
+
+        glow = new Paint(Paint.ANTI_ALIAS_FLAG);
+        glow.setColor(0xFF9D4EDD);
+        glow.setStyle(Paint.Style.STROKE);
+        glow.setStrokeWidth(dp(2));
+        glow.setShadowLayer(dp(12), 0, 0, 0x779D4EDD);
+
         dim = new Paint(Paint.ANTI_ALIAS_FLAG);
-        dim.setColor(Color.BLACK);
-        dim.setStyle(Paint.Style.FILL);
+        dim.setColor(0x88000000);
+
+        text = new Paint(Paint.ANTI_ALIAS_FLAG);
+        text.setColor(Color.WHITE);
+        text textSize(sp(15));
+        text.setShadowLayer(dp(2), 0, 0, 0xFF000000);
+
+        setWillNotDraw(false);
     }
 
-    /** Стрелка у края экрана, остриём к краю: left/right/up/down. */
-    public void showArrow(String direction) {
-        type = TYPE_ARROW;
-        dir = (direction == null || direction.isEmpty()) ? "down" : direction;
-        show();
-    }
-
-    /** Пульсирующее кольцо в точке кадра, x/y в процентах 0..100. */
-    public void showMarker(float x, float y) {
-        type = TYPE_MARKER;
-        xPct = clamp(x, 0f, 100f);
-        yPct = clamp(y, 0f, 100f);
-        show();
-    }
-
-    /**
-     * Хайлайт: затемнение + скруглённая рамка вокруг области.
-     * Координаты в процентах 0..100 (x1<x2, y1<y2).
-     */
     public void showHighlight(float x1, float y1, float x2, float y2) {
         type = TYPE_HIGHLIGHT;
         x1Pct = clamp(Math.min(x1, x2), 0f, 100f);
@@ -78,20 +77,27 @@ public class OverlayView extends View {
         show();
     }
 
-    /** Убрать маркер немедленно (алиас для FrameCapture.hideOverlay). */
-    public void clearMarker() {
+    public void showMarker(float x, float y) {
+        type = TYPE_MARKER;
+        xPct = clamp(x, 0f, 100f);
+        yPct = clamp(y, 0f, 100f);
+        show();
+    }
+
+    public void showArrow(String direction) {
+        type = TYPE_ARROW;
+        dir = (direction == null || direction.isEmpty()) ? "center" : direction;
+        show();
+    }
+
+    private void clear() {
         type = 0;
         invalidate();
     }
 
-    /** Есть ли активный маркер (без спама при пустом poll). */
-    public boolean hasMarker() {
-        return type != 0;
-    }
-
-    /** Убрать маркер немедленно (старое имя). */
-    public void clear() {
-        clearMarker();
+    private void clearMarker() {
+        type = 0;
+        invalidate();
     }
 
     private void show() {
@@ -99,12 +105,8 @@ public class OverlayView extends View {
         invalidate();
     }
 
-    private float clamp(float v, float min, float max) {
-        return v < min ? min : (v > max ? max : v);
-    }
-
-    private float dp(int v) {
-        return v * getResources().getDisplayMetrics().density;
+    public boolean hasMarker() {
+        return type != 0;
     }
 
     @Override
@@ -131,24 +133,19 @@ public class OverlayView extends View {
             float ry1 = y1Pct / 100f * h;
             float rx2 = x2Pct / 100f * w;
             float ry2 = y2Pct / 100f * h;
-            rect.set(rx1, ry1, rx2, ry2);
-            float radius = dp(12);
+            float edge = dp(4);
+            float rr = dp(12);
 
-            // затемнение всего фона (сквозь вырезается область)
             dim.setAlpha((int) (DIM_ALPHA * 255 * alpha));
             path.reset();
             path.addRect(0, 0, w, h, Path.Direction.CW);
-            path.addRect(rect.left, rect.top, rect.right, rect.bottom, Path.Direction.CCW);
+            path.addRect(rx1, ry1, rx2, ry2, Path.Direction.CCW);
             canvas.drawPath(path, dim);
-
-            // скруглённая рамка
-            float rr = Math.min(radius, Math.min(rect.width(), rect.height()) / 2f);
-            rect.set(rect.left - dp(4), rect.top - dp(4),
-                    rect.right + dp(4), rect.bottom + dp(4));
             stroke.setAlpha(a);
             stroke.setStrokeWidth(dp(4));
-            canvas.drawRoundRect(rect, rr, rr, stroke);
+            canvas.drawRoundRect(rx1 - dp(4), ry1 - dp(4), rx2 + dp(4), ry2 + dp(4), rr, rr);
             stroke.setStrokeWidth(dp(5));
+            canvas.drawRoundRect(rx1 - dp(4), ry1 - dp(4), rx2 + dp(4), ry2 + dp(4), rr, rr);
         } else if (type == TYPE_MARKER) {
             float mx = xPct / 100f * w;
             float my = yPct / 100f * h;
@@ -162,6 +159,7 @@ public class OverlayView extends View {
         } else {
             float edge = dp(30), len = dp(40), half = dp(17);
             float tipX, tipY, tailX, tailY;
+
             if ("left".equals(dir)) {
                 tipX = edge; tipY = cy; tailX = edge + len; tailY = cy;
             } else if ("right".equals(dir)) {
@@ -171,15 +169,16 @@ public class OverlayView extends View {
             } else {
                 tipX = cx; tipY = h - edge; tailX = cx; tailY = h - edge - len;
             }
+
             double ang = Math.atan2(tipY - tailY, tipX - tailX);
             float bx = tipX - (float) (len * 0.5 * Math.cos(ang));
             float by = tipY - (float) (len * 0.5 * Math.sin(ang));
             path.reset();
             path.moveTo(tipX, tipY);
             path.lineTo(tipX - (float) (half * Math.cos(ang - 0.55)),
-                    tipY - (float) (half * Math.sin(ang - 0.55)));
+                        tipY - (float) (half * Math.sin(ang - 0.55)));
             path.lineTo(tipX - (float) (half * Math.cos(ang + 0.55)),
-                    tipY - (float) (half * Math.sin(ang + 0.55)));
+                        tipY - (float) (half * Math.sin(ang + 0.55)));
             path.close();
             fill.setAlpha((int) (120 * alpha));
             stroke.setAlpha(a);
@@ -187,7 +186,15 @@ public class OverlayView extends View {
             canvas.drawPath(path, fill);
             canvas.drawPath(path, stroke);
         }
-        // тик анимации (пульс + затухание)
+
         postInvalidateDelayed(50);
+    }
+
+    private float clamp(float v, float min, float max) {
+        return v < min ? min : (v > max ? max : v);
+    }
+
+    private float dp(int v) {
+        return v * getResources().getDisplayMetrics().density;
     }
 }
