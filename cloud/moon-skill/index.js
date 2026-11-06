@@ -87,24 +87,33 @@ function isFollowUp(utter) {
 // G5: «играю в X» ловится; стоп-лист служебных слов: «я в порядке» НЕ игра.
 const GAME_SET_RES = [
   /^(?:(?:я\s+)?игра(?:ю|ешь|ет|ем|ете|ут|ют)?\s+в|включи игру|запусти игру)\s+(.+)$/i,
-  /^(?:я\s+)?(?:сейчас\s+)?игра(?:ю|ем)\s+(?!в\s)(.+)$/i, // «играю cyberpunk 2077» без предлога
   /^запусти лунного[,.!]?\s*(?:я\s+)?в\s+(.+)$/i,
   /^переключи(?:сь)?\s+на\s+(.+)$/i,
-  /^я\s+в\s+(.{2,60})$/i
+  /^я\s+в\s+(.{2,60})$/i,
+  // последним: «играю cyberpunk 2077», «играю с другом в X» (хвост чистит gameFrom)
+  /^(?:я\s+)?(?:сейчас\s+|сегодня\s+)?игра(?:ю|ем)\s+(.+)$/i
 ];
 const GAME_STOP_RE = /(?:^|\s)(порядке?|себе|курс[е]|шок[е]|отпуск[е]|настроени[ие]|движени[ие]|процесс[е]|форм[е]|ток[е]|восторг[е]|поиск[е]|очеред[и]|замешательств[е]|дел[е]|пут[и]|срок[е])/i;
 function isGameSet(utter) {
   const s = String(utter || '').toLowerCase().replace(/ё/g, 'е').trim();
   return GAME_SET_RES.some(re => re.test(s));
 }
+// Хвост после «играю»: «с другом/с друзьями/вдвоём» отбрасываем, «в» перед
+// названием тоже; «на гитаре», «по сети» — не название игры.
+const GAME_FILLER_RE = /^(?:с\s+\S+\s+|со\s+\S+\s+|вдвоем\s+|вдвоём\s+|сейчас\s+|сегодня\s+|теперь\s+)+/i;
+const GAME_LEAD_PREP_RE = /^(?:на|за|у|по|про|для|из|от|к|ко|до|без|о|об|при|не|с|со)(?:\s|$)/i;
 function gameFrom(utter) {
   const s = String(utter || '').trim();
-  for (const re of GAME_SET_RES) {
-    const m = s.match(re);
-    if (m) {
-      const g = m[1].replace(/[.!,?]$/, '').trim().slice(0, 60);
-      return GAME_STOP_RE.test(g) ? '' : g; // G5: стоп-лист «я в ...»
+  for (let i = 0; i < GAME_SET_RES.length; i++) {
+    const m = s.match(GAME_SET_RES[i]);
+    if (!m) continue;
+    let g = m[1].replace(/[.!,?]$/, '').trim();
+    if (i === GAME_SET_RES.length - 1) { // форма без предлога
+      g = g.replace(GAME_FILLER_RE, '').replace(/^в\s+/i, '').trim();
+      if (!g || GAME_LEAD_PREP_RE.test(g)) return '';
     }
+    g = g.slice(0, 60);
+    return GAME_STOP_RE.test(g) ? '' : g; // G5: стоп-лист «я в ...»
   }
   return '';
 }

@@ -131,6 +131,14 @@ test('«играю cyberpunk 2077» без предлога: в игру поп�
   assert.strictEqual(g.response.text, 'Принято, игра: cyberpunk 2077. Спрашивай!');
   const g2 = await say('Сейчас играю Hitman 3', { state: { application: g.application_state } });
   assert.strictEqual(g2.application_state.game, 'Hitman 3');
+  const g3 = await say('Играю с другом в Ведьмак 3', { state: { application: g2.application_state } });
+  assert.strictEqual(g3.application_state.game, 'Ведьмак 3');
+  // «играю на гитаре» / «играю по сети» — не смена игры
+  for (const ph of ['Играю на гитаре', 'Играю по сети с другом']) {
+    const r = await say(ph, { state: { application: g3.application_state } });
+    assert.doesNotMatch(r.response.text, /Принято, игра/);
+    assert.strictEqual(r.application_state.game, 'Ведьмак 3');
+  }
 });
 
 test('смена игры голым названием и защита вопросов с цифрами', async () => {
