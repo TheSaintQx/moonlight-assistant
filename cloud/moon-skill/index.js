@@ -280,12 +280,14 @@ function loadState(req) {
   return best || {};
 }
 // S-2: анонимный идентификатор игрока для бэкенда (сырые id наружу не уходят).
+// Секретная соль (env MOON_UID_SALT): без неё uid выводится из user_id Алисы.
+const UID_SALT = process.env.MOON_UID_SALT || 'moon:';
 function makeUid(session) {
   const s = session || {};
   const raw = (s.user && s.user.user_id) || (s.application && s.application.application_id) ||
     s.user_id || '';
   if (!raw) return '';
-  return 'u-' + crypto.createHash('sha256').update('moon:' + String(raw)).digest('hex').slice(0, 24);
+  return 'u-' + crypto.createHash('sha256').update(UID_SALT + String(raw)).digest('hex').slice(0, 24);
 }
 
 // Эхо session обязателен
