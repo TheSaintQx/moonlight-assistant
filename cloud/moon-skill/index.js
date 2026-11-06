@@ -216,6 +216,14 @@ async function setGame(game, supersede, timeoutMs, uid) {
   }, Math.max(150, Math.min(1200, timeoutMs || 1200)));
 }
 
+// Игра этого игрока с бэкенда (если Алиса не вернула стейт).
+async function fetchUserGame(uid, timeoutMs) {
+  if (!uid) return '';
+  const r = await cloudFetch('?token=' + encodeURIComponent(TOKEN) + '&usergame=1&uid=' +
+    encodeURIComponent(uid), { method: 'GET' }, timeoutMs || 800);
+  return (r.kind === 'ok' && r.body && typeof r.body.game === 'string') ? r.body.game.slice(0, 60) : '';
+}
+
 // F4: атомарная очистка ожидания (G1: вместе с окнами скользящего TTL)
 function clearPending(s) {
   s.qid = 0; s.cid = ''; s.followUpUntil = 0; s.followUpMax = 0; s.followUpFrom = 0;
@@ -338,6 +346,11 @@ module.exports.handler = async function (event) {
       conf: typeof m.conf === 'number' ? m.conf : null }));
     return resp(v, session, endSession, uState);
   };
+
+  // Стейт Алисы потерян: игру для приветствия и «какая игра» берём с бэкенда по uid.
+  if (!uState.game && uid && ((session.new && !utter) || isGameInfo(utter))) {
+    uState.game = await fetchUserGame(uid, 800);
+  }
 
   // старт навыка: приветствие только на пустом старте
   if (session.new && !utter) {

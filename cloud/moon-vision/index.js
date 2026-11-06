@@ -235,8 +235,30 @@ function mergeState(st, cur, now) {
     if (!c || (rec && (rec.gameSetAt || 0) >= (c.gameSetAt || 0))) us[u] = rec;
   }
   m.users = us;
+  pruneState(m);
   return m;
 }
+// Ретенция ПОСЛЕ слияния: иначе mergeState возвращает удалённые записи из S3.
+const TERMINAL = ['done', 'expired', 'superseded', 'cancelled'];
+function recTime(id, r) { return (r && (r.createdAtMs || (r.createdAt || 0) * 1000)) || 0; }
+function pruneState(m) {
+  const ans = m.answers || {};
+  const ids = Object.keys(ans);
+  if (ids.length > KEEP_ANSWERS) {
+    const terminal = ids.filter(id => ans[id] && TERMINAL.includes(ans[id].status))
+      .sort((a, b) => recTime(a, ans[a]) - recTime(b, ans[b]));
+    let overflow = ids.length - KEEP_ANSWERS;
+    for (const id of terminal) { if (overflow-- <= 0) break; delete ans[id]; }
+  }
+  const us = m.users || {};
+  const uids = Object.keys(us);
+  if (uids.length > KEEP_USERS) {
+    uids.sort((a, b) => ((us[a] && us[a].gameSetAt) || 0) - ((us[b] && us[b].gameSetAt) || 0));
+    for (const u of uids.slice(0, uids.length - KEEP_USERS)) delete us[u];
+  }
+}
+// Запись чужого uid недоступна; записи без uid и запросы без uid — как раньше (совместимость).
+function ownerOk(rec, uid) { return !uid || !rec || !rec.uid || rec.uid === uid; }
 function casBackoff(i) { return 30 * (i + 1) + crypto.randomInt(80); }
 async function saveState(st) {
   for (let i = 0; i < 4; i++) {
@@ -497,6 +519,7 @@ async function handleGame(game, supersedeValue, uidValue) {
     const rec = st.answers[String(supersedeValue)];
     if (rec) old = { id: String(supersedeValue), rec: rec };
   }
+  if (old && !ownerOk(old.rec, cleanUid(uidValue))) old = null;
   if (old && !['done', 'expired', 'superseded', 'cancelled'].includes(old.rec.status)) {
     old.rec.status = 'superseded';
     old.rec.supersededAt = nowS();
@@ -551,11 +574,6 @@ function rememberUserGame(st, uid, game) {
   if (!uid) return;
   st.users = st.users || {};
   st.users[uid] = { game: game, gameSetAt: Date.now() };
-  const ids = Object.keys(st.users);
-  if (ids.length > KEEP_USERS) {
-    ids.sort((a, b) => (st.users[a].gameSetAt || 0) - (st.users[b].gameSetAt || 0));
-    for (const id of ids.slice(0, ids.length - KEEP_USERS)) delete st.users[id];
-  }
 }
 // U1: игра из запроса > игра этого uid > свежая глобальная (однопользовательский стенд).
 function effectiveGame(st, requested, uid) {
@@ -645,6 +663,7 @@ async function handleAsk(q, game, cidValue, supersedeValue, uidValue) {
       const rec = st.answers[supersede];
       if (rec) old = { id: supersede, rec: rec };
     }
+    if (old && !ownerOk(old.rec, uid)) old = null;
     if (old && !['done', 'expired', 'superseded', 'cancelled'].includes(old.rec.status)) {
       old.rec.status = 'superseded';
       old.rec.supersededAt = now;
@@ -675,15 +694,7 @@ async function handleAsk(q, game, cidValue, supersedeValue, uidValue) {
   st.answers[String(qid)] = { status: 'pending', q: nq, game: requestedGame,
     cid: cid || '', uid: uid, show: showQ, createdAt: now, createdAtMs: createdAtMs };
   st.marker = null; st.markerSetAt = Date.now();
-  const ids = Object.keys(st.answers);
-  if (ids.length > KEEP_ANSWERS) {
-    const terminal = ids.filter(id => {
-      const r = st.answers[id];
-      return r && ['done', 'expired', 'superseded', 'cancelled'].includes(r.status);
-    }).sort((a, b) => Number(a) - Number(b));
-    let overflow = ids.length - KEEP_ANSWERS;
-    for (const id of terminal) { if (overflow-- <= 0) break; delete st.answers[id]; }
-  }
+  pruneState(st);
   if (!(await saveState(st))) return { code: 503, body: { status: 'wait' } };
   const after = await getState();
   await processOne(after, String(qid));
@@ -718,6 +729,7 @@ async function handleAnswer(qidParam, cidValue, uidValue) {
   let rec = (st.answers || {})[id];
   if (!rec) return { code: 409, body: { status: 'expired', qid: Number(id), cid: cid || '' } };
   if (cid && rec.cid && rec.cid !== cid) return { code: 404, body: { status: 'not_found' } };
+  if (!ownerOk(rec, cleanUid(uidValue))) return { code: 404, body: { status: 'not_found' } };
   if (rec.status === 'superseded' || rec.status === 'cancelled' || rec.status === 'expired') {
     return { code: 200, body: { status: rec.status, qid: Number(id), cid: rec.cid || '' } };
   }
@@ -794,6 +806,14 @@ async function route(event) {
   console.log('mv: ' + method + ' ' + Object.keys(qp).join(','));
   if (method === 'GET') {
     if (qp.state === '1') return stateOut(await getState());
+    if (qp.usergame === '1') {
+      const uid = cleanUid(qp.uid);
+      if (!uid) return { code: 400, body: { status: 'bad_request' } };
+      const st = await getState();
+      const u = (st.users || {})[uid];
+      const fresh = u && u.game && Date.now() - (u.gameSetAt || 0) <= GAME_FRESH_MS;
+      return { code: 200, body: { status: 'ok', game: fresh ? cleanGameStr(u.game) : '' } };
+    }
     if (qp.ask !== undefined && qp.ask.trim()) {
       return handleAsk(sanitizeQ(qp.ask),
         typeof qp.game === 'string' ? qp.game : '', qp.cid, qp.supersede, qp.uid);

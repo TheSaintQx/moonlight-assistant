@@ -146,3 +146,45 @@ test('бэкенд: answer без qid/cid и без uid по-прежнему no
   const r = await vision.handler({ httpMethod: 'GET', queryStringParameters: { token: 'test-token', answer: '1' } });
   assert.strictEqual(JSON.parse(r.body).status, 'none');
 });
+
+test('«какая игра» без state берёт игру uid с бэкенда', async () => {
+  store.clear();
+  await say('Играю в Cyberpunk 2077');
+  const r = await say('Какая сейчас игра');
+  assert.strictEqual(r.response.text, 'Игра: Cyberpunk 2077.');
+  const hi = await say('', { isNew: true });
+  assert.match(hi.response.text, /Продолжаем Cyberpunk 2077/);
+});
+
+async function api(method, qp, body) {
+  const r = await vision.handler({ httpMethod: method, queryStringParameters: Object.assign({ token: 'test-token' }, qp),
+    headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : '' });
+  return { code: r.statusCode, body: JSON.parse(r.body) };
+}
+
+test('бэкенд: ответ чужого uid по qid не отдаётся', async () => {
+  store.clear();
+  await postFrame();
+  const a = await api('POST', {}, { q: 'что на экране', game: 'X', uid: 'u-aaaaaaaaaaaa' });
+  const qid = a.body.qid;
+  assert.ok(qid);
+  const other = await api('GET', { answer: '1', qid: String(qid), uid: 'u-bbbbbbbbbbbb' });
+  assert.strictEqual(other.body.status, 'not_found');
+  const mine = await api('GET', { answer: '1', qid: String(qid), uid: 'u-aaaaaaaaaaaa' });
+  assert.strictEqual(mine.body.status, 'done');
+});
+
+test('бэкенд: ретенция ответов и игроков переживает слияние CAS', async () => {
+  store.clear();
+  await postFrame();
+  for (let i = 0; i < 12; i++) {
+    const uid = 'u-' + String(i).padStart(12, '0');
+    await api('POST', {}, { game: 'G' + i, uid });
+    await api('POST', {}, { q: 'вопрос номер ' + i, game: 'G' + i, uid });
+  }
+  for (let i = 12; i < 40; i++) await api('POST', {}, { game: 'G' + i, uid: 'u-' + String(i).padStart(12, '0') });
+  const st = JSON.parse(store.get('state.json').body.toString('utf8'));
+  assert.ok(Object.keys(st.answers).length <= 8, 'answers=' + Object.keys(st.answers).length);
+  assert.ok(Object.keys(st.users).length <= 32, 'users=' + Object.keys(st.users).length);
+  assert.ok(st.users['u-000000000039']);
+});

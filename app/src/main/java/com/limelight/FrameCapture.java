@@ -62,7 +62,7 @@ public class FrameCapture {
     private long netCacheAt = 0;
     private long lastBgCaptureAt = 0;
     private long lastBurstCaptureAt = 0;
-    private int lastSentQid = 0;
+    private long lastSentQid = 0;
     private long lastNonQueryAt = 0;
     private long lastPollDiagAt = 0;
 
@@ -372,7 +372,8 @@ public class FrameCapture {
                     // РЕЗЕРВНЫЙ КАНАЛ: burst по status:"query" (guard не трогать)
                     if ("query".equals(status)) {
                         lastNonQueryAt = 0;
-                        int qid = j.optInt("qid", 0);
+                        // qid бэкенда до 2^48 — в int переполняется
+                        long qid = j.optLong("qid", 0L);
                         String q = j.optString("q", "");
                         if (qid > 0 && qid != lastSentQid) {
                             lastSentQid = qid;
@@ -407,7 +408,7 @@ public class FrameCapture {
         }
     };
 
-    private void sendBurst(final int qid, final String q) {
+    private void sendBurst(final long qid, final String q) {
         netHandler.post(new Runnable() {
             @Override public void run() {
                 try {
