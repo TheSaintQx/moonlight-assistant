@@ -1080,13 +1080,15 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         }
 
         super.onPause();
-        if (assistantManager != null) assistantManager.stop();
-        if (frameCapture != null) frameCapture.stop();
+        // Захват не останавливаем на паузе: при открытии Алисы поверх стрима или в режиме
+        // «картинка в картинке» активити только на паузе, а кадры нужны бэкенду.
     }
 
     @Override
     protected void onStop() {
         super.onStop();
+        if (assistantManager != null) assistantManager.stop();
+        if (frameCapture != null) frameCapture.stop();
 
         SpinnerDialog.closeDialogs(this);
         Dialog.closeDialogs();

@@ -2,6 +2,20 @@
 
 const crypto = require('crypto');
 
+// v3.2 (06.11, разбор живого теста v3.1):
+//   S-1 [D-A]: стейт пишется в session_state + application_state + user_state_update
+//        (user_state Алиса отдаёт только авторизованным и только при включённом
+//        хранилище) и читается из самого свежего (поле ts).
+//   S-2 [D-A]: анонимный uid (sha256 user_id|application_id) уходит на бэкенд в
+//        ask/game/answer — бэкенд помнит игру игрока, даже если стейт Алисы потерян.
+//   S-3 [D-B]: «ну что там» без qid/cid спрашивает бэкенд по uid (последний
+//        запрос ЭТОГО игрока); гейт followup учитывает cid.
+//   S-4: сессия не закрывается после ответа (было end_session:true -> «Сессия
+//        завершена» после каждой реплики); выход — «хватит/стоп/выход».
+//   S-5: название игры берётся из original_utterance (регистр «Cyberpunk 2077»);
+//        голое название с цифрами меняет игру и при уже выбранной игре.
+//   S-6: приветствие укладывается в лимит cleanVoice (3 предложения).
+
 // v3.1 (патчи Алисы 06.11, верифицировано юнит-пробами):
 //   F-1: G5 — «игра(?:ю|ешь|ет|ем|ете|ут|ют)? в» (было (?:ем|аю)? — «играю в» НЕ ловился);
 //        стоп-лист: порядке? (было порядк[аи]); F-2: G8+G9 одной строкой
@@ -49,7 +63,7 @@ const ANSWER_TIMEOUT_MS = 1200; // один GET /answer (не больше ша�
 const POLL_STEP_MS      = 1200; // шаг опроса
 const FOLLOWUP_TTL_MS   = 120000; // сколько живёт «ну что там» после filler
 const FOLLOWUP_CEIL_MS  = 300000; // G1: потолок скользящего TTL (5 мин)
-const VER               = '9.6-a-v3.1'; // версия логов v3.1 (F-1..F-4)
+const VER               = '9.6-a-v3.2'; // версия логов v3.2 (S-1..S-6)
 const VOICE_MAX         = 400;
 
 // show-фразы: всегда новый анализ, без кеша (бэкенд тоже так решает)
@@ -100,6 +114,11 @@ function isHelp(utter) {
     .replace(/^алиса,?\s*/, '');
   return /^(помощь|что ты умеешь|какие команды|как пользоваться|команды)$/.test(s);
 }
+function isExit(utter) {
+  const s = String(utter || '').toLowerCase().replace(/ё/g, 'е')
+    .replace(/[!?,.]/g, '').replace(/\s+/g, ' ').trim();
+  return /^(хватит|стоп|выход|выйти|закончить|заверши(ть)?( навык)?|пока|до свидания|спасибо пока)$/.test(s);
+}
 function isGameInfo(utter) {
   const s = String(utter || '').toLowerCase().replace(/ё/g, 'е');
   return /какая (сейчас )?игра|во что (мы )?играем|во что играешь|какая у нас игра/.test(s);
@@ -107,10 +126,16 @@ function isGameInfo(utter) {
 
 // Без слов «я в» принимаем только безопасную форму названия с цифрами
 // (например, Cyberpunk 2077), если игра ещё не выбрана.
+const QUESTION_START_RE = /^(что|как|где|кто|сколько|какой|какая|какое|какие|каких|почему|зачем|когда|куда|откуда|чем|чей|можно|есть|дай|скажи|расскажи|найди|покажи|обведи)(\s|$)/i;
+function normGame(s) {
+  return String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-я0-9]+/g, ' ').trim();
+}
 function isBareGameTitle(utter, currentGame) {
-  const s = String(utter || '').trim();
-  if (currentGame || !/^[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9 .:'-]{1,58}$/.test(s)) return false; // F-4: + кириллица («Ведьмак 3»)
-  if (!/\d/.test(s)) return false;
+  const s = String(utter || '').trim().replace(/[.!]$/, '');
+  if (!/^[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9 .:'-]{1,58}$/.test(s)) return false; // F-4: + кириллица («Ведьмак 3»)
+  if (!/\d/.test(s) || QUESTION_START_RE.test(s)) return false;
+  // S-5: то же название повторно — не смена игры, но и не вопрос: подтверждаем.
+  if (currentGame && normGame(currentGame) === normGame(s)) return true;
   const parts = s.split(/\s+/);
   return parts.length >= 2 && parts.length <= 4;
 }
@@ -158,9 +183,10 @@ function makeCid(session, utter) {
 }
 
 // POST /ask: CID делает повтор запроса идемпотентным; supersede заменяет прежнее ожидание.
-async function ask(q, game, cid, supersede, timeoutMs) {
+async function ask(q, game, cid, supersede, timeoutMs, uid) {
   const payload = { q: String(q || '').slice(0, 200), cid: String(cid || '').slice(0, 64) };
   if (game) payload.game = String(game).slice(0, 60);
+  if (uid) payload.uid = uid;
   if (supersede) payload.supersede = String(supersede).slice(0, 64);
   return await cloudFetch('?token=' + encodeURIComponent(TOKEN), {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -168,18 +194,21 @@ async function ask(q, game, cid, supersede, timeoutMs) {
   }, Math.max(200, timeoutMs));
 }
 
-// GET /answer: всегда конкретный qid или CID; глобальный «самый свежий» не используется.
-async function answer(qid, cid, timeoutMs) {
+// GET /answer: конкретный qid/CID; без них — последний запрос ЭТОГО uid (S-3).
+// Глобальный «самый свежий» не используется.
+async function answer(qid, cid, timeoutMs, uid) {
   const p = '?token=' + encodeURIComponent(TOKEN) + '&answer=1' +
     (qid ? '&qid=' + encodeURIComponent(qid) : '') +
-    (cid ? '&cid=' + encodeURIComponent(cid) : '');
+    (cid ? '&cid=' + encodeURIComponent(cid) : '') +
+    (uid ? '&uid=' + encodeURIComponent(uid) : '');
   return await cloudFetch(p, { method: 'GET' },
     Math.max(150, Math.min(ANSWER_TIMEOUT_MS, timeoutMs || ANSWER_TIMEOUT_MS)));
 }
 
 // F2: setGame больше не 5000 — только остаток бюджета (кап 1200).
-async function setGame(game, supersede, timeoutMs) {
+async function setGame(game, supersede, timeoutMs, uid) {
   const payload = { game: String(game).slice(0, 60) };
+  if (uid) payload.uid = uid;
   if (supersede) payload.supersede = String(supersede).slice(0, 64);
   return await cloudFetch('?token=' + encodeURIComponent(TOKEN), {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -208,11 +237,11 @@ function pluralSec(n) {
 }
 
 // F2+F3: опрос в пределах дедлайна; сон и после сбоя — без шторма.
-async function pollAnswer(qid, cid, untilMs) {
+async function pollAnswer(qid, cid, untilMs, uid) {
   while (Date.now() < untilMs) {
     const remaining = untilMs - Date.now() - SAFETY_MS;
     if (remaining < 150) return null;
-    const r = await answer(qid, cid, Math.min(1200, remaining));
+    const r = await answer(qid, cid, Math.min(1200, remaining), uid);
     if (r.kind !== 'ok') {
       if (Date.now() + POLL_STEP_MS > untilMs) return null;
       await new Promise(res => setTimeout(res, POLL_STEP_MS));
@@ -230,7 +259,28 @@ async function pollAnswer(qid, cid, untilMs) {
   return null;
 }
 
-// Эхо session обязателен; user_state_update — персистентно между сессиями
+// S-1: стейт Алисы — три канала. session_state живёт в сессии,
+// application_state — на устройстве (работает без авторизации),
+// user_state_update — у авторизованного пользователя. Читаем самый свежий по ts.
+function loadState(req) {
+  const st = (req && req.state) || {};
+  let best = null;
+  for (const c of [st.session, st.application, st.user]) {
+    if (!c || typeof c !== 'object' || !Object.keys(c).length) continue;
+    if (!best || (Number(c.ts) || 0) > (Number(best.ts) || 0)) best = c;
+  }
+  return best || {};
+}
+// S-2: анонимный идентификатор игрока для бэкенда (сырые id наружу не уходят).
+function makeUid(session) {
+  const s = session || {};
+  const raw = (s.user && s.user.user_id) || (s.application && s.application.application_id) ||
+    s.user_id || '';
+  if (!raw) return '';
+  return 'u-' + crypto.createHash('sha256').update('moon:' + String(raw)).digest('hex').slice(0, 24);
+}
+
+// Эхо session обязателен
 function resp(text, session, endSession, userState) {
   const out = {
     version: '1.0',
@@ -241,7 +291,12 @@ function resp(text, session, endSession, userState) {
       end_session: !!endSession
     }
   };
-  if (userState) out.user_state_update = userState;
+  if (userState) {
+    const snap = Object.assign({}, userState, { ts: Date.now() });
+    out.session_state = snap;
+    out.application_state = snap;
+    out.user_state_update = snap;
+  }
   return out;
 }
 
@@ -257,7 +312,9 @@ module.exports.handler = async function (event) {
   const session = (req && req.session) || {};
   const utter = String((req && req.request &&
     (req.request.command || req.request.original_utterance)) || '').trim();
-  const user = (req && req.state && req.state.user) || {};
+  const origUtter = String((req && req.request && req.request.original_utterance) || utter).trim();
+  const user = loadState(req);
+  const uid = makeUid(session);
   const uState = {
     game: String(user.game || '').slice(0, 60),
     qid: user.qid || 0,
@@ -276,7 +333,7 @@ module.exports.handler = async function (event) {
     const m = meta || {};
     console.log(JSON.stringify({ s: 'moon', v: VER, route: finalRoute,
       status: status || 'ok', ms: Date.now() - t0, end: !!endSession,
-      hasGame: !!uState.game, hasQid: !!uState.qid,
+      hasGame: !!uState.game, hasQid: !!uState.qid, hasUid: !!uid,
       unk: m.unk === true, src: m.src || 'none', frame_id: m.frame_id || null,
       conf: typeof m.conf === 'number' ? m.conf : null }));
     return resp(v, session, endSession, uState);
@@ -285,12 +342,19 @@ module.exports.handler = async function (event) {
   // старт навыка: приветствие только на пустом старте
   if (session.new && !utter) {
     route('start');
-    return reply('Привет! Я Лунный Ассистент. Скажи, во что играешь, и задавай вопросы. Скажи «покажи» — и я обведу объект на экране.', false, 'ok');
+    return reply(uState.game
+      ? 'Привет! Продолжаем ' + uState.game + ' — задавай вопросы, а по слову «покажи» обведу объект на экране.'
+      : 'Привет! Я Лунный Ассистент: скажи, во что играешь, и задавай вопросы. По слову «покажи» обведу объект на экране.', false, 'ok');
+  }
+
+  if (isExit(utter)) {
+    route('exit');
+    return reply('До встречи! Удачной игры.', true, 'ok');
   }
 
   if (isHelp(utter)) {
     route('help');
-    return reply('Скажи, во что играешь, и задавай вопросы. «Покажи воина» — обведу объект на экране. «Ну что там» — забрать ответ, если я сказал «собираю».', true, 'ok');
+    return reply('Скажи, во что играешь, и задавай вопросы. «Покажи воина» — обведу объект на экране. «Ну что там» — забрать ответ, если я сказал «собираю».', false, 'ok');
   }
 
   if (isGameInfo(utter)) {
@@ -302,38 +366,41 @@ module.exports.handler = async function (event) {
   // Ж1/Ж7 (G1/G2): «ну что там» и синонимы — добор отложенного ответа.
   // TTL проверяем ДО запроса; при query — скользящий TTL, ожидание живёт.
   const doFollowUp = async () => {
-    if (!uState.followUpUntil && !uState.qid) {
+    const hasLocal = !!(uState.followUpUntil || uState.qid || uState.cid);
+    if (!hasLocal && !uid) {
       route('followup-none');
-      return reply('Я пока ничего не собирал. Задай вопрос.', true, 'none');
+      return reply('Я пока ничего не собирал. Задай вопрос.', false, 'none');
     }
-    if (Date.now() > uState.followUpUntil) {
+    if (uState.followUpUntil && Date.now() > uState.followUpUntil) {
       route('followup-ttl');
       clearPending(uState);
-      return reply('Ответ не успел собраться. Спроси ещё раз.', true, 'expired');
+      return reply('Ответ не успел собраться. Спроси ещё раз.', false, 'expired');
     }
+    // S-3: локального ожидания нет (стейт Алисы потерян) — бэкенд ищет по uid.
     const r = await answer(uState.qid || 0, uState.cid,
-      turnDeadline - Date.now() - SAFETY_MS);
+      turnDeadline - Date.now() - SAFETY_MS, uid);
     if (r.body && (r.body.status === 'done' || r.body.status === 'clarify')) {
       route(r.body.status === 'clarify' ? 'followup-clarify' : 'followup-done');
       clearPending(uState);
       const t = String(r.body.text || '');
-      return reply(t ? t : 'Честно: пока не знаю. Спроси иначе.', true,
+      return reply(t ? t : 'Честно: пока не знаю. Спроси иначе.', false,
         r.body.status === 'clarify' ? 'clarify' : (t ? 'done' : 'done-empty'), r.body);
     }
     if (r.body && (r.body.status === 'superseded' || r.body.status === 'cancelled')) {
       route('followup-superseded');
       clearPending(uState);
-      return reply('Этот запрос уже заменён новым. Скажи «ну что там» после нового вопроса.', true, 'superseded');
+      return reply('Этот запрос уже заменён новым. Скажи «ну что там» после нового вопроса.', false, 'superseded');
     }
     if (r.body && r.body.status === 'none') {
       route('followup-none');
       clearPending(uState);
-      return reply('Не нашёл запрос, который нужно проверить. Задай вопрос ещё раз.', true, 'none');
+      return reply(hasLocal ? 'Не нашёл запрос, который нужно проверить. Задай вопрос ещё раз.'
+        : 'Я пока ничего не собирал. Задай вопрос.', false, 'none');
     }
     if (r.body && r.body.status === 'expired') {
       route('followup-expired');
       clearPending(uState);
-      return reply('Ответ не успел собраться. Спроси ещё раз.', true, 'expired');
+      return reply('Ответ не успел собраться. Спроси ещё раз.', false, 'expired');
     }
     if (r.kind === 'network' || r.kind === 'http') {
       route('followup-network');
@@ -362,24 +429,28 @@ module.exports.handler = async function (event) {
   // — тоже добор: «ну», «а ну», «есть?», «чё там» и прочие до трёх слов.
   const words = utter.split(/\s+/).filter(Boolean);
   const pendAlive = !!uState.qid || Date.now() < uState.followUpUntil;
-  if (pendAlive && words.length <= 3 && !isShow(utter) && !isGameSet(utter)) {
+  if (pendAlive && words.length <= 3 && !isShow(utter) && !isGameSet(utter) &&
+      !isBareGameTitle(utter, uState.game)) {
     route('followup-short');
     return await doFollowUp();
   }
 
   // установка игры. F4: смена игры чистит старое ожидание. F2: остаток бюджета.
   if ((isGameSet(utter) || isBareGameTitle(utter, uState.game)) && !isShow(utter)) { // F10: show важнее
-    const g = isGameSet(utter) ? gameFrom(utter) : utter.trim().slice(0, 60);
+    // S-5: название — из original_utterance (Алиса приводит command к нижнему регистру)
+    const g = isGameSet(utter)
+      ? (gameFrom(origUtter) || gameFrom(utter))
+      : (isBareGameTitle(origUtter, uState.game) ? origUtter : utter).trim().replace(/[.!]$/, '').slice(0, 60);
     if (g) {
       route('setgame');
       const oldCid = uState.cid || (uState.qid ? String(uState.qid) : '');
       clearPending(uState);
       uState.game = g;
-      const sg = await setGame(g, oldCid, turnDeadline - Date.now() - SAFETY_MS);
+      const sg = await setGame(g, oldCid, turnDeadline - Date.now() - SAFETY_MS, uid);
       if (sg.status === 200) {
         return reply('Принято, игра: ' + g + '. Спрашивай!', false, 'ok');
       }
-      return reply('Записал у себя: ' + g + '. Бэкенд не подтвердил — если что-то пойдёт не так, назови игру ещё раз.', true, 'degraded');
+      return reply('Записал у себя: ' + g + '. Бэкенд не подтвердил — если что-то пойдёт не так, назови игру ещё раз.', false, 'degraded');
     }
   }
 
@@ -396,32 +467,32 @@ module.exports.handler = async function (event) {
   clearPending(uState);
   uState.cid = cid;
   const r = await ask(utter, uState.game, cid, oldCid,
-    Math.min(ASK_TIMEOUT_MS, turnDeadline - Date.now() - SAFETY_MS));
+    Math.min(ASK_TIMEOUT_MS, turnDeadline - Date.now() - SAFETY_MS), uid);
 
   if (r.body && (r.body.status === 'done' || r.body.status === 'clarify')) {
     route(r.body.status === 'clarify' ? 'ask-clarify' : 'ask-done');
     clearPending(uState);
     const t = String(r.body.text || '');
-    return reply(t ? t : 'Честно: пока не знаю. Спроси иначе.', true,
+    return reply(t ? t : 'Честно: пока не знаю. Спроси иначе.', false,
       r.body.status === 'clarify' ? 'clarify' : (t ? 'done' : 'done-empty'), r.body);
   }
   if (r.body && (r.body.status === 'superseded' || r.body.status === 'cancelled' || r.body.status === 'expired')) {
     route('ask-terminal');
     clearPending(uState);
-    return reply('Запрос завершён до получения ответа. Задай вопрос ещё раз.', true, r.body.status);
+    return reply('Запрос завершён до получения ответа. Задай вопрос ещё раз.', false, r.body.status);
   }
   if (r.body && r.body.status === 'query' && r.body.qid) {
     uState.qid = r.body.qid;
-    const got = await pollAnswer(r.body.qid, cid, turnDeadline - SAFETY_MS);
+    const got = await pollAnswer(r.body.qid, cid, turnDeadline - SAFETY_MS, uid);
     if (got && got.text) {
       route(got.clarify ? 'poll-clarify' : 'poll-done');
       clearPending(uState);
-      return reply(got.text, true, got.clarify ? 'clarify' : 'done', got.meta);
+      return reply(got.text, false, got.clarify ? 'clarify' : 'done', got.meta);
     }
     if (got && got.expired) {
       route('poll-expired');
       clearPending(uState);
-      return reply('Ответ не успел собраться или запрос был заменён. Спроси ещё раз.', true, 'expired');
+      return reply('Ответ не успел собраться или запрос был заменён. Спроси ещё раз.', false, 'expired');
     }
     route('poll-filler');
     slideFollowUp(uState);
@@ -447,9 +518,9 @@ module.exports.handler = async function (event) {
   }
   if (r.kind === 'http' && r.body && r.body.status === 'bad_request') {
     route('ask-bad-request');
-    return reply('Скажи вопрос целиком, я не поняла.', true, 'bad-request');
+    return reply('Скажи вопрос целиком, я не поняла.', false, 'bad-request');
   }
   // сетевой сбой / http-ошибка: запрос, скорее всего, не дошёл — честно
   route('ask-network');
-  return reply('Связь с сервером подвела. Скажи вопрос ещё раз.', true, 'network');
+  return reply('Связь с сервером подвела. Скажи вопрос ещё раз.', false, 'network');
 };

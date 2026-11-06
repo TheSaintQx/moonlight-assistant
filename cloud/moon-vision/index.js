@@ -1,6 +1,15 @@
 'use strict';
 
-// moon-vision v2.8.4.8-draft — show marker enforcement + CID/grounding.
+// moon-vision v2.8.4.9 — per-uid игра/ожидание + честная диагностика кадров.
+// Изменения 2.8.4.9 (разбор живого теста навыка v3.1, 06.11):
+//   (U1) uid игрока (навык v3.2): POST {game,uid} помнит игру игрока в st.users;
+//        POST {q} без game берёт игру uid, затем свежую st.game (стейт Алисы
+//        терялся — отсюда «Сначала назови игру» после «Принято, игра»).
+//   (U2) GET ?answer=1&uid=… без qid/cid — последний запрос ЭТОГО uid
+//        («ну что там» после потери стейта). Глобальный «свежайший» по-прежнему нет.
+//   (U3) без кадра — сколько назад пришёл последний кадр и что сделать.
+//   (U4) совет/выбор из вариантов, читаемых на кадре, разрешён (fail-closed
+//        сохраняется: только текст кадра); show-ответ несёт короткую речь.
 // Основа: v2.8.4.5; изменения v2.8.4.7-draft:
 //   (1) CID идемпотентен; GET /answer умеет искать запрос по CID после timeout.
 //   (2) supersede блокирует публикацию результата старого цикла.
@@ -44,11 +53,13 @@ const MAX_GAME = 60;
 const MAX_BODY = 256 * 1024;
 const MARKER_INTERVAL_S = 3;
 const MARKER_FRESH_S = 5; // оверлей живёт 5 с после ответа
-const BACKEND_VERSION = '2.8.4.8';
+const BACKEND_VERSION = '2.8.4.9';
+const GAME_FRESH_MS = 12 * 3600 * 1000; // игра игрока считается актуальной 12 ч
+const KEEP_USERS = 32;
 
-const SYS = 'Ты — Лунный Ассистент. Отвечай по-русски, кратко: 1–3 предложения, до 400 знаков. Верни только JSON вида {\"speech\":\"текст\",\"unk\":false,\"conf\":0.8,\"clarify\":null,\"marker\":null}. Факты разрешено утверждать только если они прямо подтверждаются переданными свежими кадрами. Не используй внутренние знания об игре, догадки, фанатские названия или непроверенную локализацию. Название предмета, локации, персонажа, навыка или стойки произноси только если оно отчётливо читается на русском интерфейсе кадра; иначе не называй его. Если кадры не подтверждают ответ, верни unk=true и conf=0. Если референт нельзя однозначно определить из текущего кадра и вопроса, верни clarify с коротким уточнением. conf — самооценка от 0 до 1, не измеренная вероятность. Не добавляй фактов, которых нет в кадрах.';
+const SYS = 'Ты — Лунный Ассистент. Отвечай по-русски, кратко: 1–3 предложения, до 400 знаков. Верни только JSON вида {\"speech\":\"текст\",\"unk\":false,\"conf\":0.8,\"clarify\":null,\"marker\":null}. Факты разрешено утверждать только если они прямо подтверждаются переданными свежими кадрами. Не используй внутренние знания об игре, догадки, фанатские названия или непроверенную локализацию. Название предмета, локации, персонажа, навыка или стойки произноси только если оно отчётливо читается на русском интерфейсе кадра; иначе не называй его. Если кадры не подтверждают ответ, верни unk=true и conf=0. Если игрок просит совет или выбрать лучший из вариантов, которые видны на кадре (меню, предыстории, диалоговые реплики, предметы), можно рекомендовать один вариант, опираясь только на читаемые на кадре названия и описания, и одной фразой назвать причину из этого текста; это не unk. Если референт нельзя однозначно определить из текущего кадра и вопроса, верни clarify с коротким уточнением. conf — самооценка от 0 до 1, не измеренная вероятность. Не добавляй фактов, которых нет в кадрах.';
 
-const SHOW_PROMPT = ' Это обязательная команда визуального выделения, а не просьба только описать экран. Найди объект, который игрок попросил показать. Если объект однозначно виден и его положение можно локализовать, ОБЯЗАТЕЛЬНО верни marker типа rect с координатами x1,y1,x2,y2 от 0 до 100 (границы всего объекта с небольшим запасом) либо arrow с направлением. В этом случае speech должно быть коротким подтверждением «Отметил объект на экране», без описательного абзаца. Если объект не виден, неразличим или нельзя уверенно локализовать, верни unk=true, conf=0, marker:null и speech «Не удалось выделить объект на кадре». Никогда не заменяй выделение длинным словесным описанием.';
+const SHOW_PROMPT = ' Это обязательная команда визуального выделения, а не просьба только описать экран. Найди объект, который игрок попросил показать. Если объект однозначно виден и его положение можно локализовать, ОБЯЗАТЕЛЬНО верни marker типа rect с координатами x1,y1,x2,y2 от 0 до 100 (границы всего объекта с небольшим запасом) либо arrow с направлением. В этом случае speech — одна короткая фраза: что именно отмечено (если игрок просил выбрать вариант — какой и почему, по тексту кадра), без описательного абзаца. Если объект не виден, неразличим или нельзя уверенно локализовать, верни unk=true, conf=0, marker:null и speech «Не удалось выделить объект на кадре». Никогда не заменяй выделение длинным словесным описанием.';
 
 function jres(r) {
   return { statusCode: r.code || 200,
@@ -92,7 +103,7 @@ function hasUnresolvedReferent(q) {
 function blankState() {
   return { game: '', gameSetAt: 0, lastFrameTs: 0, lastFrameSize: 0,
     qid: 0, frameSeq: 0, ring: [], lastAnswerText: '', lastAnswerAt: 0,
-    marker: null, markerSetAt: 0, answers: {} };
+    marker: null, markerSetAt: 0, answers: {}, users: {} };
 }
 function tokenOk(t) {
   const a = Buffer.from(String(t || '')), b = Buffer.from(TOKEN);
@@ -218,6 +229,12 @@ function mergeState(st, cur, now) {
     merged[id] = a && c ? pickRec(a, c, now) : (a || c);
   }
   m.answers = merged;
+  const us = Object.assign({}, cur.users || {});
+  for (const [u, rec] of Object.entries(st.users || {})) {
+    const c = us[u];
+    if (!c || (rec && (rec.gameSetAt || 0) >= (c.gameSetAt || 0))) us[u] = rec;
+  }
+  m.users = us;
   return m;
 }
 function casBackoff(i) { return 30 * (i + 1) + crypto.randomInt(80); }
@@ -318,7 +335,8 @@ function parseAnswer(raw, show) {
     if (show) {
       // Не выдаём словесное описание за выполненное визуальное выделение.
       if (j.unk || !marker) return fail();
-      return { text: 'Отметил объект на экране.', marker: marker,
+      const sp = String(j.speech || '').trim();
+      return { text: sp && sp.length <= 200 ? sp : 'Отметил объект на экране.', marker: marker,
         unk: false, conf: j.conf, clarify: null };
     }
     return { text: j.unk ? String(j.speech || 'Не могу подтвердить ответ по кадру.') : j.speech,
@@ -432,13 +450,14 @@ async function processOne(st, id) {
   try { frameInfo = await latestBurst(st); } catch { frameInfo = null; }
 
   // Без кадра и без названной игры — только уточнение, никаких фактов из памяти модели.
+  const fix = ' Держи стрим Moonlight на экране телефона или в режиме «картинка в картинке» и спроси снова.';
   if (!frameInfo && !mine.game) {
-    out = { text: 'Сначала назови игру и открой её экран — тогда смогу проверить ответ.',
+    out = { text: 'Не вижу экран игры и не знаю, во что ты играешь. Скажи «играю в …». ' + frameAgeText(st) + fix,
       marker: null, unk: true, conf: 0, src: 'none', frame_id: null,
       resultStatus: 'clarify' };
   } else if (!frameInfo) {
     // В этой версии нет подключённой проверенной KB/RAG. Без кадра фактический ответ запрещён.
-    out = { text: 'Не вижу свежего кадра, а проверенной справки сейчас нет. Покажи экран или уточни вопрос позже.',
+    out = { text: 'Не вижу экран игры. ' + frameAgeText(st) + fix,
       marker: null, unk: true, conf: 0, src: 'none', frame_id: null,
       resultStatus: 'done' };
   } else if (hasUnresolvedReferent(mine.q)) {
@@ -469,7 +488,7 @@ async function processOne(st, id) {
 }
 
 // ---------- обработчики ----------
-async function handleGame(game, supersedeValue) {
+async function handleGame(game, supersedeValue, uidValue) {
   let st;
   try { st = await getState(); } catch { return { code: 503, body: { status: 'wait' } }; }
   const supersede = cleanCid(supersedeValue);
@@ -484,6 +503,7 @@ async function handleGame(game, supersedeValue) {
   }
   st.game = cleanGameStr(game);
   st.gameSetAt = Date.now();
+  rememberUserGame(st, cleanUid(uidValue), st.game);
   if (!(await saveState(st))) return { code: 503, body: { status: 'wait' } };
   console.log('mv game set: ' + st.game);
   return { code: 200, body: { status: 'ok' } };
@@ -523,6 +543,48 @@ async function handleFrame(buf) {
   return { code: 200, body: { status: 'ok',
     marker: emitMarker(freshMarker(res.state)) } };
 }
+function cleanUid(value) {
+  const u = String(value || '').trim();
+  return /^u-[a-f0-9]{8,48}$/.test(u) ? u : '';
+}
+function rememberUserGame(st, uid, game) {
+  if (!uid) return;
+  st.users = st.users || {};
+  st.users[uid] = { game: game, gameSetAt: Date.now() };
+  const ids = Object.keys(st.users);
+  if (ids.length > KEEP_USERS) {
+    ids.sort((a, b) => (st.users[a].gameSetAt || 0) - (st.users[b].gameSetAt || 0));
+    for (const id of ids.slice(0, ids.length - KEEP_USERS)) delete st.users[id];
+  }
+}
+// U1: игра из запроса > игра этого uid > свежая глобальная (однопользовательский стенд).
+function effectiveGame(st, requested, uid) {
+  if (requested) return requested;
+  const now = Date.now();
+  const u = uid && st.users && st.users[uid];
+  if (u && u.game && now - (u.gameSetAt || 0) <= GAME_FRESH_MS) return cleanGameStr(u.game);
+  if (st.game && now - (st.gameSetAt || 0) <= GAME_FRESH_MS) return cleanGameStr(st.game);
+  return '';
+}
+// U2: последний запрос конкретного uid (не глобальный «свежайший»).
+function findLatestByUid(st, uid) {
+  if (!uid) return null;
+  let best = null;
+  for (const id of Object.keys(st.answers || {})) {
+    const rec = st.answers[id];
+    if (!rec || rec.uid !== uid) continue;
+    const t = rec.createdAtMs || (rec.createdAt || 0) * 1000;
+    if (!best || t > best.t) best = { id: id, rec: rec, t: t };
+  }
+  return best;
+}
+function frameAgeText(st) {
+  if (!st || !st.lastFrameTs) return 'Кадры с телефона ещё не приходили.';
+  const min = Math.round(Math.max(0, nowS() - st.lastFrameTs) / 60);
+  if (min < 1) return 'Последний кадр пришёл меньше минуты назад, но он уже устарел.';
+  if (min < 120) return 'Последний кадр пришёл ' + min + ' мин назад.';
+  return 'Последний кадр пришёл больше ' + Math.floor(min / 60) + ' ч назад.';
+}
 function cleanCid(value) {
   const cid = String(value || '').trim();
   return /^[A-Za-z0-9._-]{1,64}$/.test(cid) ? cid : '';
@@ -547,17 +609,18 @@ function answerPayload(id, rec) {
     frame_id: legacy ? null : (rec.frame_id || null),
     conf: legacy ? 0 : (typeof rec.conf === 'number' ? rec.conf : null) };
 }
-async function handleAsk(q, game, cidValue, supersedeValue) {
+async function handleAsk(q, game, cidValue, supersedeValue, uidValue) {
   let st;
   try { st = await getState(); } catch { return { code: 503, body: { status: 'wait' } }; }
   const nq = normalize(q);
   if (nq.length < 2) return { code: 200, body: { status: 'bad_request' } };
   const now = nowS();
-  // Игра берётся только из запроса клиента; глобальная st.game не доказывает игру этого игрока.
-  const requestedGame = game ? cleanGameStr(game) : ''; 
+  const uid = cleanUid(uidValue);
+  // U1: игра из запроса; если навык её потерял — игра этого uid / свежая глобальная.
+  const requestedGame = effectiveGame(st, game ? cleanGameStr(game) : '', uid);
   const cid = cleanCid(cidValue);
   if (cidValue && !cid) return { code: 400, body: { status: 'bad_request', why: 'invalid_cid' } };
-  if (game) { st.game = requestedGame; st.gameSetAt = Date.now(); }
+  if (game) { st.game = requestedGame; st.gameSetAt = Date.now(); rememberUserGame(st, uid, requestedGame); }
 
   // Повтор POST с тем же CID возвращает уже существующий запрос, не создавая новый.
   if (cid) {
@@ -610,7 +673,7 @@ async function handleAsk(q, game, cidValue, supersedeValue) {
     (Math.floor(createdAtMs / 1000) * (2 ** 20) + crypto.randomInt(2 ** 20));
   st.qid = Math.max(st.qid || 0, qid);
   st.answers[String(qid)] = { status: 'pending', q: nq, game: requestedGame,
-    cid: cid || '', show: showQ, createdAt: now, createdAtMs: createdAtMs };
+    cid: cid || '', uid: uid, show: showQ, createdAt: now, createdAtMs: createdAtMs };
   st.marker = null; st.markerSetAt = Date.now();
   const ids = Object.keys(st.answers);
   if (ids.length > KEEP_ANSWERS) {
@@ -634,7 +697,7 @@ async function handleAsk(q, game, cidValue, supersedeValue) {
   }
   return { code: 200, body: { status: 'query', qid: qid, cid: cid } };
 }
-async function handleAnswer(qidParam, cidValue) {
+async function handleAnswer(qidParam, cidValue, uidValue) {
   let st;
   try { st = await getState(); }
   catch { return { code: 503, body: { status: 'server_error' } }; }
@@ -646,7 +709,11 @@ async function handleAnswer(qidParam, cidValue) {
     const found = findAnswerByCid(st, cid);
     if (found) id = found.id;
   }
-  // Без qid/CID не выбираем глобально «самый свежий» ответ: это мог быть чужой запрос.
+  if (!id && !cidValue) {
+    const latest = findLatestByUid(st, cleanUid(uidValue));
+    if (latest) id = latest.id;
+  }
+  // Без qid/CID/uid не выбираем глобально «самый свежий» ответ: это мог быть чужой запрос.
   if (!id) return { code: 200, body: { status: 'none', cid: cid || '' } };
   let rec = (st.answers || {})[id];
   if (!rec) return { code: 409, body: { status: 'expired', qid: Number(id), cid: cid || '' } };
@@ -729,7 +796,7 @@ async function route(event) {
     if (qp.state === '1') return stateOut(await getState());
     if (qp.ask !== undefined && qp.ask.trim()) {
       return handleAsk(sanitizeQ(qp.ask),
-        typeof qp.game === 'string' ? qp.game : '', qp.cid, qp.supersede);
+        typeof qp.game === 'string' ? qp.game : '', qp.cid, qp.supersede, qp.uid);
     }
     if (qp.answer === '1') {
       if (qp.qid !== undefined) {
@@ -740,9 +807,9 @@ async function route(event) {
         if (!Number.isSafeInteger(n) || n <= 0) {
           return { code: 400, body: { status: 'bad_request' } };
         }
-        return handleAnswer(n, qp.cid);
+        return handleAnswer(n, qp.cid, qp.uid);
       }
-      return handleAnswer(0, qp.cid);
+      return handleAnswer(0, qp.cid, qp.uid);
     }
     if (qp.poll === '1') return pollOut(await getState());
     return configOut(await getState());
@@ -785,9 +852,9 @@ async function route(event) {
       return { code: 400, body: { status: 'bad_request' } };
     }
     if (typeof j.q === 'string' && j.q.trim()) {
-      return handleAsk(sanitizeQ(j.q), typeof j.game === 'string' ? j.game : '', j.cid, j.supersede);
+      return handleAsk(sanitizeQ(j.q), typeof j.game === 'string' ? j.game : '', j.cid, j.supersede, j.uid);
     }
-    if (typeof j.game === 'string' && j.game.trim()) return handleGame(j.game, j.supersede);
+    if (typeof j.game === 'string' && j.game.trim()) return handleGame(j.game, j.supersede, j.uid);
     return { code: 400, body: { status: 'bad_request' } };
   }
   return { code: 405, body: { status: 'method_not_allowed' } };
