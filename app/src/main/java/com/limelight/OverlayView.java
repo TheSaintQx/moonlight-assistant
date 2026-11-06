@@ -22,6 +22,9 @@ public class OverlayView extends View {
     private float xPct = 50f, yPct = 50f;
     private float x1Pct = 0f, y1Pct = 0f, x2Pct = 0f, y2Pct = 0f;
     private long shownAt = 0;
+    // Границы видео внутри оверлея: координаты модели относятся к кадру стрима,
+    // а не к экрану (стрим с чёрными полосами уже/ниже экрана).
+    private float vidL = 0f, vidT = 0f, vidW = 0f, vidH = 0f;
 
     private final Paint stroke;
     private final Paint scan;
@@ -76,6 +79,10 @@ public class OverlayView extends View {
         text.setShadowLayer(dp(2), 0, 0, 0xFF000000);
 
         setWillNotDraw(false);
+    }
+
+    public void setVideoBounds(float left, float top, float width, float height) {
+        vidL = left; vidT = top; vidW = width; vidH = height;
     }
 
     public void showHighlight(float x1, float y1, float x2, float y2) {
@@ -134,21 +141,24 @@ public class OverlayView extends View {
         }
         int a = (int) (255 * alpha);
 
-        float w = getWidth(), h = getHeight();
-        float cx = w / 2f, cy = h / 2f;
+        float fullW = getWidth(), fullH = getHeight();
+        boolean haveVid = vidW > 0 && vidH > 0 && vidW <= fullW + 1 && vidH <= fullH + 1;
+        float w = haveVid ? vidW : fullW, h = haveVid ? vidH : fullH;
+        float ox = haveVid ? vidL : 0f, oy = haveVid ? vidT : 0f;
+        float cx = ox + w / 2f, cy = oy + h / 2f;
         float r = Math.min(w, h) * 0.055f;
 
         if (type == TYPE_HIGHLIGHT) {
-            float rx1 = x1Pct / 100f * w;
-            float ry1 = y1Pct / 100f * h;
-            float rx2 = x2Pct / 100f * w;
-            float ry2 = y2Pct / 100f * h;
+            float rx1 = ox + x1Pct / 100f * w;
+            float ry1 = oy + y1Pct / 100f * h;
+            float rx2 = ox + x2Pct / 100f * w;
+            float ry2 = oy + y2Pct / 100f * h;
             float edge = dp(4);
             float rr = dp(12);
 
             dim.setAlpha((int) (DIM_ALPHA * 255 * alpha));
             path.reset();
-            path.addRect(0, 0, w, h, Path.Direction.CW);
+            path.addRect(0, 0, fullW, fullH, Path.Direction.CW);
             path.addRect(rx1, ry1, rx2, ry2, Path.Direction.CCW);
             canvas.drawPath(path, dim);
             stroke.setAlpha(a);
@@ -157,8 +167,8 @@ public class OverlayView extends View {
             stroke.setStrokeWidth(dp(5));
             canvas.drawRoundRect(rx1 - dp(4), ry1 - dp(4), rx2 + dp(4), ry2 + dp(4), rr, rr, stroke);
         } else if (type == TYPE_MARKER) {
-            float mx = xPct / 100f * w;
-            float my = yPct / 100f * h;
+            float mx = ox + xPct / 100f * w;
+            float my = oy + yPct / 100f * h;
             float pulse = 1f + 0.15f * (float) Math.sin(age / 180.0);
             fill.setAlpha((int) (90 * alpha));
             stroke.setAlpha(a);
@@ -171,13 +181,13 @@ public class OverlayView extends View {
             float tipX, tipY, tailX, tailY;
 
             if ("left".equals(dir)) {
-                tipX = edge; tipY = cy; tailX = edge + len; tailY = cy;
+                tipX = ox + edge; tipY = cy; tailX = ox + edge + len; tailY = cy;
             } else if ("right".equals(dir)) {
-                tipX = w - edge; tipY = cy; tailX = w - edge - len; tailY = cy;
+                tipX = ox + w - edge; tipY = cy; tailX = ox + w - edge - len; tailY = cy;
             } else if ("up".equals(dir)) {
-                tipX = cx; tipY = edge; tailX = cx; tailY = edge + len;
+                tipX = cx; tipY = oy + edge; tailX = cx; tailY = oy + edge + len;
             } else {
-                tipX = cx; tipY = h - edge; tailX = cx; tailY = h - edge - len;
+                tipX = cx; tipY = oy + h - edge; tailX = cx; tailY = oy + h - edge - len;
             }
 
             double ang = Math.atan2(tipY - tailY, tipX - tailX);

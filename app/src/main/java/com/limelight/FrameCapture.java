@@ -40,6 +40,9 @@ public class FrameCapture {
     private static final long CACHE_TTL_MS = 600_000L;
 
     private static final int CAPTURE_SIZE = 512;
+    // Серия для вопроса/«покажи» идёт в модель: нужна ширина, на которой читается текст меню.
+    private static final int BURST_CAPTURE_SIZE = 1024;
+    private static final int BURST_SEND = 4;
     private static final int MAX_FILES = 20;
     private static final int JPEG_QUALITY = 85;
     private static final long COPY_TIMEOUT_MS = 2000;
@@ -243,7 +246,7 @@ public class FrameCapture {
             boolean burstDue = lastBurstCaptureAt == 0
                     || now - lastBurstCaptureAt >= BURST_INTERVAL_MS;
             if (bgDue) {
-                File f = captureOnce(CAPTURE_SUBDIR);
+                File f = captureOnce(CAPTURE_SUBDIR, CAPTURE_SIZE);
                 if (f != null) {
                     lastBgCaptureAt = now;
                     rotate(captureDir(), MAX_FILES);
@@ -251,7 +254,7 @@ public class FrameCapture {
                 }
             }
             if (burstDue) {
-                File f2 = captureOnce(BURST_SUBDIR);
+                File f2 = captureOnce(BURST_SUBDIR, BURST_CAPTURE_SIZE);
                 if (f2 != null) {
                     lastBurstCaptureAt = now;
                     rotate(burstDir(), BURST_MAX);
@@ -261,14 +264,14 @@ public class FrameCapture {
         }
     };
 
-    private File captureOnce(String subdir) {
+    private File captureOnce(String subdir, int width) {
         if (Build.VERSION.SDK_INT < 26) {
             Log.w(TAG, "PixelCopy requires API 26+, capture skipped");
             return null;
         }
         if (streamView == null) return null;
-        int w = CAPTURE_SIZE;
-        int h = 144;
+        int w = width;
+        int h = Math.max(1, width * 9 / 32);
         try {
             int sw = streamView.getWidth();
             int sh = streamView.getHeight();
@@ -425,7 +428,7 @@ public class FrameCapture {
                         }
                     });
                     JSONArray arr = new JSONArray();
-                    int n = Math.min(files.length, BURST_MAX);
+                    int n = Math.min(files.length, BURST_SEND);
                     for (int i = files.length - n; i < files.length; i++) {
                         String b64 = fileToBase64(files[i]);
                         if (b64 != null) arr.put(b64);
@@ -477,6 +480,7 @@ public class FrameCapture {
                 try {
                     ensureOverlay();
                     if (overlay == null) return;
+                    syncOverlayBounds();
 
                     if (hideOverlayRunnable != null) {
                         overlay.removeCallbacks(hideOverlayRunnable);
@@ -533,6 +537,21 @@ public class FrameCapture {
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT));
             Log.i(TAG, "DIAG: overlay created");
+        }
+    }
+
+    // Координаты маркера (0..100) относятся к кадру стрима; переводим их в
+    // положение StreamView внутри оверлея (стрим может быть с чёрными полосами).
+    private void syncOverlayBounds() {
+        if (overlay == null || streamView == null) return;
+        try {
+            int[] sv = new int[2], ov = new int[2];
+            streamView.getLocationInWindow(sv);
+            overlay.getLocationInWindow(ov);
+            overlay.setVideoBounds(sv[0] - ov[0], sv[1] - ov[1],
+                    streamView.getWidth(), streamView.getHeight());
+        } catch (Exception e) {
+            Log.w(TAG, "overlay bounds sync failed: " + e);
         }
     }
 

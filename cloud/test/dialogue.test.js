@@ -125,6 +125,14 @@ test('state Алисы: application_state читается, свежий ts по
   assert.strictEqual(r.response.text, 'Игра: Ведьмак 3.');
 });
 
+test('«играю cyberpunk 2077» без предлога: в игру попадает только название', async () => {
+  store.clear();
+  const g = await say('Играю cyberpunk 2077');
+  assert.strictEqual(g.response.text, 'Принято, игра: cyberpunk 2077. Спрашивай!');
+  const g2 = await say('Сейчас играю Hitman 3', { state: { application: g.application_state } });
+  assert.strictEqual(g2.application_state.game, 'Hitman 3');
+});
+
 test('смена игры голым названием и защита вопросов с цифрами', async () => {
   store.clear();
   const g = await say('Играю в Ведьмак 3');
