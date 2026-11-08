@@ -65,6 +65,8 @@ public class FrameCapture {
     private int lastSentQid = 0;
     private long lastNonQueryAt = 0;
     private long lastPollDiagAt = 0;
+    // Последний ответ, за который мы уже поблагодарили сервер (ack).
+    private volatile int lastAckedQid = 0;
 
     private volatile OverlayView overlay;
     private volatile Runnable hideOverlayRunnable;
@@ -205,6 +207,8 @@ public class FrameCapture {
             Log.w(TAG, "DIAG: cloud config body: " + r[1]);
             if ("200".equals(r[0])) {
                 JSONObject j = new JSONObject(r[1]);
+                // Готовый ответ приходит и в конфиге: показываем его даже без захвата.
+                handleReadyIfAny(j);
                 int iv = j.optInt("interval", 0);
                 if (iv > 0) {
                     intervalS = iv;
@@ -369,6 +373,11 @@ public class FrameCapture {
                         hideOverlay();
                     }
 
+                    // ГОТОВЫЙ ОТВЕТ: сервер сам сообщает, когда ответ собран.
+                    // Маркеры и ответ независимы: ответ живёт дольше и не гаснет
+                    // вместе с маркером.
+                    handleReadyIfAny(j);
+
                     // РЕЗЕРВНЫЙ КАНАЛ: burst по status:"query" (guard не трогать)
                     if ("query".equals(status)) {
                         lastNonQueryAt = 0;
@@ -513,6 +522,75 @@ public class FrameCapture {
                     }
                 } catch (Exception e) {
                     Log.w(TAG, "overlay failed: " + e);
+                }
+            }
+        });
+    }
+
+    // ---------- готовый ответ: оверлей + подтверждение ----------
+
+    private void handleReadyIfAny(JSONObject j) {
+        if (j == null) return;
+
+        JSONObject ready = j.optJSONObject("ready");
+
+        if (ready == null) return;
+
+        handleAnswerReady(ready);
+    }
+
+    private void handleAnswerReady(final JSONObject ready) {
+        final int qid = ready.optInt("qid", 0);
+        final String text = ready.optString("text", "");
+
+        if (text.trim().isEmpty()) return;
+        // Уже показали и подтвердили — повторно не всплываем.
+        if (qid > 0 && qid == lastAckedQid) return;
+
+        final Activity act = asActivity();
+
+        if (act == null) return;
+
+        act.runOnUiThread(new Runnable() {
+            @Override public void run() {
+                try {
+                    ensureOverlay();
+                    if (overlay == null) return;
+
+                    overlay.showAnswer(text);
+                    Log.i(TAG, "DIAG: answer shown qid=" + qid
+                            + " len=" + text.length());
+
+                    if (qid > 0) {
+                        sendAck(qid);
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "answer overlay failed: " + e);
+                }
+            }
+        });
+    }
+
+    // Подтверждение показа: сервер перестаёт повторять это уведомление.
+    // Если сеть подвела, уведомление придёт снова и оверлей просто обновится.
+    private void sendAck(final int qid) {
+        if (netHandler == null) return;
+
+        netHandler.post(new Runnable() {
+            @Override public void run() {
+                try {
+                    String url = CLOUD_ENDPOINT + "?token=" + CLOUD_TOKEN
+                            + "&ack=1&qid=" + qid;
+                    String[] r = httpCall("GET", url, null, (int) NETWORK_TIMEOUT_MS);
+
+                    if ("200".equals(r[0])) {
+                        lastAckedQid = qid;
+                        Log.i(TAG, "DIAG: ack ok qid=" + qid);
+                    } else {
+                        Log.w(TAG, "ack failed qid=" + qid + " status=" + r[0]);
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "ack failed: " + e);
                 }
             }
         });
