@@ -2,10 +2,23 @@ name: Build Assistant APK
 
 on:
   push:
-    branches: [master]
+    branches: [master, feature/game-assistant]
+  pull_request:
   workflow_dispatch:
 
 jobs:
+  cloud-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Syntax check
+        run: node --check cloud/moon-skill/index.js && node --check cloud/moon-vision/index.js
+      - name: Dialogue tests (skill + vision, mocked S3/model)
+        run: node --test cloud/test/dialogue.test.js
+
   build:
     runs-on: ubuntu-24.04
     steps:

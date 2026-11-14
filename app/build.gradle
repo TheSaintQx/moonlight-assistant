@@ -11,8 +11,8 @@ android {
         minSdk 21
         targetSdk 36
 
-        versionName "12.2"
-        versionCode = 315
+        versionName "12.2.1"
+        versionCode = 316
 
         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
         ndk.debugSymbolLevel = 'FULL'
@@ -84,6 +84,8 @@ android {
     buildTypes {
         debug {
             applicationIdSuffix ".debug"
+            resValue "string", "app_label", "Лунный Ассистент Игр (Debug)"
+            resValue "string", "app_label_root", "Лунный Ассистент Игр (Root Debug)"
         }
         release {
             // To whomever is releasing/using an APK in release mode with
